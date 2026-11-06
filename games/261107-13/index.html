@@ -174,7 +174,7 @@ const SND={
 let S=null;          // persistent game state
 let memOnly=false;   // storage unavailable
 const P={onB:null,acts:[],wait:0,hat:0,step:0,stepT:0,moving:false,hop:0,hv:0,restT:0,look:[0,0],patrol:null,stepI:0,idleT:0};
-const FX={parts:[],flip:null,pendingFlip:-1,corner:0,cv:0,cornerPeekT:0,stubGone:0};
+const FX={parts:[],touch:null,flip:null,pendingFlip:-1,corner:0,cv:0,cornerPeekT:0,stubGone:0};
 const CNT={taps:0,strokes:0,bridges:0,rotates:0,plazas:0,grows:0,flaps:0,rests:0,refolds:0,flips:0,patrols:0,shakes:0,cancels:0,saves:0,saveFail:0,demo:0};
 let hint=null,hintT=0,hintDirty=true,demo=null,demoDone=false,lastInput=0,nowT=0,cycleIdx=0;
 let mirror=1,squash=1,squashV=0;
@@ -876,7 +876,7 @@ function classify(raw,cancelled){
   saveSoon();
   return 'free';
 }
-function tickPts(w){const t=perp(UP);return [add(w,mul(t,-10)),add(w,mul(t,10))];}
+function tickPts(w){const t=mul(perp(UP),Math.max(10,pxw(14)));return [sub(w,t),add(w,t)];}
 
 // ============================================================
 //  flip of the whole blueprint
@@ -1077,6 +1077,7 @@ function onDown(e){
   const w=evWorld(e);
   try{cv.setPointerCapture(e.pointerId);}catch(err){}
   active={id:e.pointerId,pts:[w],t0:nowT,sp:pieceNear(w,55),snapId:-1,speed:0,lastP:[e.clientX,e.clientY]};
+  FX.touch={p:w.slice(),t:0,released:false};
   SND.tick();drawGain(0.0);
   const p=pieceNear(w,26);if(p){const nb=nearB(p,w);if(nb.d<26){wobble(p,nb.pt,7);}}
   draw();                                // immediate feedback on the very first touch
@@ -1095,6 +1096,7 @@ function onMove(e){
   active.speed=Math.min(1,active.speed*0.7+Math.hypot(dx,dy)/40*0.3);drawGain(0.06*active.speed);
   // shore snapping preview
   const cur=active.pts[active.pts.length-1];
+  if(FX.touch)FX.touch.p=cur.slice();
   const sp=active.sp;const np=pieceNear(cur,62);
   const sid=np&&np!==sp&&sp?np.id:-1;
   if(sid!==active.snapId){active.snapId=sid;if(sid>0)SND.snap();}
@@ -1102,6 +1104,7 @@ function onMove(e){
 function endStroke(cancelled){
   if(!active)return;
   const a=active;active=null;drawGain(0);
+  if(FX.touch){if(cancelled)FX.touch=null;else{FX.touch.released=true;FX.touch.t=0;}}
   try{if(cv.hasPointerCapture&&cv.hasPointerCapture(a.id))cv.releasePointerCapture(a.id);}catch(err){}
   if(FX.flip)return;
   lastInput=nowT;
@@ -1116,7 +1119,7 @@ cv.addEventListener('pointerdown',onDown,{passive:false});
 cv.addEventListener('pointermove',onMove,{passive:false});
 cv.addEventListener('pointerup',onUp,{passive:false});
 cv.addEventListener('pointercancel',onCancel,{passive:false});
-cv.addEventListener('lostpointercapture',e=>{if(active&&e.pointerId===active.id)endStroke(false);});
+cv.addEventListener('lostpointercapture',e=>{if(active&&e.pointerId===active.id)endStroke(true);});
 window.addEventListener('blur',()=>{if(active)endStroke(true);});
 for(const ev of ['contextmenu','selectstart','dragstart','gesturestart','gesturechange','gestureend','dblclick'])document.addEventListener(ev,e=>e.preventDefault(),{passive:false});
 document.addEventListener('touchmove',e=>{e.preventDefault();},{passive:false});
@@ -1128,6 +1131,7 @@ document.addEventListener('touchstart',e=>{if(e.touches&&e.touches.length>1)e.pr
 function springV(o,k,vk,target,kk,damp,dt){o[vk]+=(target-o[k])*kk*dt;o[vk]*=Math.exp(-damp*dt);o[k]+=o[vk]*dt;}
 function update(dt){
   nowT+=dt;
+  if(FX.touch){FX.touch.t+=dt;if(FX.touch.released&&FX.touch.t>=1.8)FX.touch=null;}
   if(saveTimer>=0){saveTimer-=dt;if(saveTimer<0)saveNow();}
   // flip
   if(FX.pendingFlip>=0){FX.pendingFlip-=dt;if(FX.pendingFlip<0){if(active)FX.pendingFlip=0.3;else{FX.pendingFlip=-1;if(!S.flipped)startFlip();}}}
@@ -1470,6 +1474,19 @@ function drawActive(){
       ctx.lineWidth=lw(6,2.6);line(cur,tgt);ctx.strokeStyle=LB;ctx.lineWidth=lw(4,2);ctx.beginPath();ctx.arc(tgt[0],tgt[1],18+Math.sin(nowT*14)*3,0,TAU);ctx.stroke();}
   }
 }
+function drawTouch(){
+  // Local pen contact: stays visible while held, then lifts off the paper.
+  const touch=FX.touch;if(!touch)return;
+  const s=toScreen(touch.p),t=touch.t;
+  const r=touch.released?32+12*Math.min(t,1.8):28+4*Math.sin(t*5);
+  ctx.save();ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.globalAlpha=touch.released?Math.min(1,(1.8-t)/0.6):1;
+  ctx.setLineDash([]);ctx.strokeStyle=LB;ctx.lineWidth=3;
+  ctx.beginPath();ctx.arc(s[0],s[1],r,0,TAU);ctx.stroke();
+  ctx.strokeStyle=WH;ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(s[0],s[1],r-7,0,TAU);ctx.stroke();
+  ctx.restore();
+}
 function drawHint(){
   if(!hint||active||FX.flip)return;
   const pul=0.5+0.5*Math.sin(nowT*4.2);
@@ -1589,6 +1606,7 @@ function draw(){
   drawParts();
   drawPuppet();
   drawHand();
+  drawTouch();
 }
 
 // ============================================================
