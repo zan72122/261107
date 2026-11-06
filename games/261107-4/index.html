@@ -418,8 +418,9 @@ function hitTest(px,py){
   const [gx,gy]=P(girl.x,girl.y,girl.z+.21*CS);
   const gr=Math.max(34,S*.22*CS);
   if(Math.hypot((px-gx)*1.1,py-gy)<gr) return {kind:'girl'};
-  for(let k=hits.length-1;k>=0;k--){const h=hits[k]; if(Math.hypot(px-h.x,py-h.y)<h.r) return h;}
-  return null;
+  let best=null,bs=1;
+  for(let k=hits.length-1;k>=0;k--){const h=hits[k], q=Math.hypot(px-h.x,py-h.y)/h.r*(h.kind==='hole'?.8:1); if(q<bs){bs=q;best=h;}}
+  return best;
 }
 cv.addEventListener('pointerdown',e=>{
   e.preventDefault();
