@@ -1,0 +1,1248 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="format-detection" content="telephone=no">
+<title>どん、あとから！墨のたいこのお返事みち</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#f3eee2;
+  touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;overscroll-behavior:none;position:fixed;inset:0}
+canvas{position:fixed;left:0;top:0;display:block;touch-action:none;-webkit-touch-callout:none}
+#safe{position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;
+  padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);
+  padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="safe"></div>
+<script>
+'use strict';
+(function(){
+// ============================================================
+//  墨のたいこのお返事みち  — single file, no network
+//  Drums: 0 = left, 1 = centre, 2 = right
+// ============================================================
+var cv = document.getElementById('c');
+var ctx = cv.getContext('2d');
+var W = 0, H = 0, DPR = 1, U = 1;
+var TAU = Math.PI * 2;
+var LEFT = 0, CEN = 1, RIGHT = 2;
+
+function clamp(v, a, b){ return v < a ? a : v > b ? b : v; }
+function lerp(a, b, t){ return a + (b - a) * t; }
+function mod(a, n){ return ((a % n) + n) % n; }
+function rnd(a, b){ return a + Math.random() * (b - a); }
+function ink(a){ return 'rgba(22,19,17,' + a.toFixed(3) + ')'; }
+
+// seeded noise for stable brush jitter
+var seedArr = [];
+(function(){ var s = 12345; for (var i = 0; i < 4096; i++){ s = (s * 16807) % 2147483647; seedArr.push(s / 2147483647); } })();
+function sr(i){ return seedArr[(i | 0) & 4095]; }
+
+// ------------------------------------------------------------
+//  World state
+// ------------------------------------------------------------
+var drums = [0, 1, 2].map(function(i){
+  return { i: i, x: 0, y: 0, r: 50, s: 0, v: 0, tilt: 0, tiltV: 0, level: 0, pool: 0,
+           lastArr: -9, sprite: null, spriteS: 0, held: 0, glow: 0, bob: 0 };
+});
+var ringG = { cx: 0, cy: 0, R: 100, thL: 0, dir: 1, span: 1, uC: 0.5, uMax: 2 };
+var now = 0;               // game clock (seconds, paused when hidden)
+var speed = 1;             // test hook
+var SONGS = [
+  { bpm: 96,  root: 1.00, scale: [293.7, 329.6, 392.0, 440.0, 493.9, 587.3], mel: [0,-1,2,-1,3,-1,2,-1, 4,-1,3,-1,2,-1,-1,-1], wave: 'triangle' },
+  { bpm: 104, root: 1.12, scale: [293.7, 311.1, 392.0, 440.0, 466.2, 587.3], mel: [0,-1,-1,1,2,-1,4,-1, 3,-1,-1,2,1,-1,0,-1], wave: 'sine' },
+  { bpm: 88,  root: 0.89, scale: [261.6, 329.6, 349.2, 392.0, 493.9, 523.3], mel: [2,-1,1,-1,0,-1,-1,-1, 3,-1,4,-1,5,-1,-1,-1], wave: 'triangle' },
+  { bpm: 112, root: 1.19, scale: [293.7, 349.2, 392.0, 440.0, 523.3, 587.3], mel: [0,1,-1,2,-1,3,-1,-1, 5,-1,4,-1,3,2,-1,-1], wave: 'sine' },
+  { bpm: 92,  root: 0.94, scale: [329.6, 370.0, 440.0, 493.9, 554.4, 659.3], mel: [4,-1,3,-1,-1,2,-1,-1, 1,-1,0,-1,1,-1,-1,-1], wave: 'triangle' },
+  { bpm: 100, root: 1.06, scale: [246.9, 293.7, 329.6, 370.0, 440.0, 493.9], mel: [0,-1,-1,-1,2,-1,3,-1, 4,-1,-1,3,-1,2,-1,-1], wave: 'sine' }
+];
+var songIdx = 0, song = SONGS[0], beat = 60 / song.bpm, t0 = 0, last8 = -1;
+
+var phase = 'play';        // play | chase | flip | reverse | closing | ring
+var history = [];          // distinct drums in tap order this cycle
+var lastEdge = -1, memEdge = -1;
+var lastHitDrum = -1, lastHitT = -99;
+var origin = -1, originT = 0;
+var cycle = 0, prevOrder = null, ghostOrder = null, ghostA = 0, ghostRingA = 0;
+var segThick = [1, 1], segShown = [1, 1];
+var roadFlip = 0, roadFlipTarget = 0, flipP = 0, flipT0 = 0, flipDur = 1;
+var ringP = 0, ringPTarget = 0, ringHits = 0, ringWob = { a: 0, ang: 0, t: -9 }, lastReceiver = -1;
+var fps = [], fpId = 1, groupId = 1;
+var events = [];
+var revOrder = [];
+var lastInput = 0, firstTouched = false, handShown = {}, hand = null;
+var stamps = [], MAX_STAMPS = 380;
+var parts = [], MAX_PARTS = 120;
+var ripples = [], MAX_RIPPLES = 40;
+var crossMarks = [];
+var log = [], counts = {};
+function L(ev, o){ counts[ev] = (counts[ev] || 0) + 1; var e = { t: +now.toFixed(3), ev: ev }; if (o) for (var k in o) e[k] = o[k]; log.push(e); if (log.length > 600) log.shift(); }
+
+// ------------------------------------------------------------
+//  Audio (Web Audio synthesis)
+// ------------------------------------------------------------
+var ac = null, master = null, noiseBuf = null, audioOK = false;
+function initAudio(){
+  if (ac){ if (ac.state === 'suspended') { try { ac.resume(); } catch(e){} } return; }
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    ac = new AC();
+    var comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.knee.value = 10; comp.ratio.value = 4;
+    master = ac.createGain(); master.gain.value = 0.85;
+    master.connect(comp); comp.connect(ac.destination);
+    var len = ac.sampleRate * 1;
+    noiseBuf = ac.createBuffer(1, len, ac.sampleRate);
+    var d = noiseBuf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    // unlock (iOS)
+    var b = ac.createBuffer(1, 1, 22050), s = ac.createBufferSource();
+    s.buffer = b; s.connect(ac.destination); s.start(0);
+    if (ac.state === 'suspended') ac.resume();
+    audioOK = true;
+  } catch (e) { ac = null; audioOK = false; }
+}
+function aT(off){ return ac.currentTime + (off || 0) + 0.005; }
+function env(g, t, a, peak, dec){
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(peak, t + a);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + a + dec);
+}
+function osc(type, f0, f1, sweep, t, a, peak, dec, dest){
+  if (!ac) return;
+  var o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t);
+  if (f1 && f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t + sweep);
+  env(g, t, a, peak, dec);
+  o.connect(g); g.connect(dest || master);
+  o.start(t); o.stop(t + a + dec + 0.05);
+}
+function nz(t, dur, ftype, freq, q, peak, f1){
+  if (!ac) return;
+  var s = ac.createBufferSource(); s.buffer = noiseBuf;
+  var f = ac.createBiquadFilter(); f.type = ftype; f.frequency.setValueAtTime(freq, t); f.Q.value = q;
+  if (f1) f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  var g = ac.createGain(); env(g, t, 0.002, peak, dur);
+  s.connect(f); f.connect(g); g.connect(master);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.05);
+}
+var TAPF = [175, 120, 150];      // main hit pitch per drum
+var REPF = [116, 82, 98];        // low reply pitch per drum
+function sndTouch(i){            // instant short touch sound
+  if (!ac) return; var t = aT();
+  nz(t, 0.025, 'bandpass', 2600 + i * 500, 3, 0.18);
+  osc('sine', 760 + i * 140, 600 + i * 120, 0.04, t, 0.001, 0.07, 0.05);
+}
+function sndHit(i, level){       // main drum hit
+  if (!ac) return; var t = aT();
+  var f = TAPF[i] * song.root, lv = level || 1;
+  osc('sine', f * 2.4, f, 0.05, t, 0.002, 0.55, 0.35 + lv * 0.08);
+  osc('triangle', f * 1.5, f * 1.2, 0.08, t, 0.002, 0.12, 0.12);
+  nz(t, 0.09, 'lowpass', 1100, 0.7, 0.32);
+}
+function sndReply(i, level, thick, crossed, off){   // low "don" at receiver
+  if (!ac) return; var t = aT(off || 0);
+  var f = REPF[i] * song.root / (1 + 0.14 * (thick - 1));
+  var lv = level || 1;
+  if (crossed){
+    osc('sine', 1400 + i * 120, 1300, 0.02, t, 0.001, 0.12, 0.09);
+    t += beat * 0.25;
+  }
+  osc('sine', f * 2.0, f, 0.07, t, 0.003, 0.6, 0.45 + 0.12 * (thick - 1));
+  nz(t, 0.12, 'lowpass', 600, 0.7, 0.25);
+  if (lv >= 2){                  // long low tone
+    var dur = 0.45 + 0.38 * lv;
+    osc('sine', f * 0.75, f * 0.62, dur, t + 0.02, 0.04, 0.32, dur);
+    osc(song.wave, f * 1.5, f * 1.4, dur, t + 0.02, 0.06, 0.05, dur * 0.8);
+  }
+}
+function sndStep(i, bright){
+  if (!ac) return; var t = aT();
+  if (bright){
+    osc('triangle', 620 + i * 160, 560 + i * 140, 0.03, t, 0.001, 0.07, 0.07);
+    nz(t, 0.02, 'highpass', 3000, 0.7, 0.05);
+  } else {
+    osc('sine', 300 + i * 70, 260 + i * 60, 0.03, t, 0.002, 0.05, 0.06);
+  }
+}
+function sndClack(){
+  if (!ac) return; var t = aT();
+  osc('sine', 1500, 1450, 0.05, t, 0.001, 0.2, 0.14);
+  osc('sine', 2230, 2200, 0.05, t, 0.001, 0.12, 0.1);
+  nz(t, 0.03, 'bandpass', 3500, 2, 0.15);
+}
+function sndMerge(i){
+  if (!ac) return; var t = aT();
+  var f = REPF[i] * song.root * 0.8;
+  osc('sine', f * 2.6, f, 0.08, t, 0.002, 0.85, 0.9);
+  osc('sine', f * 0.5, f * 0.45, 0.8, t, 0.01, 0.4, 1.2);
+  nz(t, 0.2, 'lowpass', 900, 0.8, 0.45);
+}
+function sndCatch(){
+  if (!ac) return; var t = aT(); var sc = song.scale;
+  osc('triangle', sc[0], sc[0], 0, t, 0.005, 0.12, 0.4);
+  osc('triangle', sc[2], sc[2], 0, t + beat * 0.25, 0.005, 0.12, 0.4);
+  osc('triangle', sc[4], sc[4], 0, t + beat * 0.5, 0.005, 0.14, 0.6);
+}
+function sndWhoosh(){
+  if (!ac) return; var t = aT();
+  nz(t, beat * 1.6, 'bandpass', 260, 1.2, 0.22, 2800);
+  osc('sine', 90, 180, beat * 1.5, t, 0.2, 0.15, beat * 1.4);
+}
+function sndMembrane(){
+  if (!ac) return; var t = aT();
+  osc('sine', 150, 55, 0.12, t, 0.003, 0.9, 1.4);
+  osc('sine', 110, 82, 0.4, t, 0.01, 0.3, 1.2);
+  nz(t, 0.25, 'lowpass', 500, 0.7, 0.5);
+}
+function sndChord(i, k){
+  if (!ac) return; var t = aT(); var sc = song.scale;
+  var f = sc[(i * 2 + k) % sc.length];
+  osc(song.wave, f, f, 0, t, 0.004, 0.13, 0.9);
+  osc('sine', f * 0.5, f * 0.5, 0, t, 0.004, 0.1, 0.7);
+  sndReply(i, 1, 1, false);
+}
+function sndBg(k){                // quiet song pulse
+  if (!ac) return; var t = aT();
+  var step = k % 16;
+  if (step % 2 === 0){
+    var acc = step === 0;
+    nz(t, 0.025, 'bandpass', acc ? 1800 : 2400, 4, acc ? 0.07 : 0.04);
+    osc('sine', acc ? 210 : 260, 200, 0.02, t, 0.001, acc ? 0.05 : 0.025, 0.05);
+  }
+  var m = song.mel[step];
+  if (m >= 0 && phase !== 'flip'){
+    var f = song.scale[m];
+    osc(song.wave, f, f * 0.998, 0.3, t, 0.004, 0.035, 0.6);
+  }
+  if (step === 0){
+    osc('sine', song.scale[0] * 0.5, song.scale[0] * 0.5, 0, t, 0.3, 0.025, beat * 3);
+  }
+}
+
+// ------------------------------------------------------------
+//  Layout
+// ------------------------------------------------------------
+var bgCanvas = null, blobSprite = null;
+function readSafe(){
+  var el = document.getElementById('safe'), cs = getComputedStyle(el);
+  return { t: parseFloat(cs.paddingTop) || 0, r: parseFloat(cs.paddingRight) || 0,
+           b: parseFloat(cs.paddingBottom) || 0, l: parseFloat(cs.paddingLeft) || 0 };
+}
+function layout(){
+  W = Math.max(1, window.innerWidth); H = Math.max(1, window.innerHeight);
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  var sf = readSafe();
+  var ax = sf.l + 8, ay = sf.t + 8, aw = W - sf.l - sf.r - 16, ah = H - sf.t - sf.b - 16;
+  var portrait = ah > aw * 1.05;
+  var P, r;
+  if (portrait){
+    r = Math.min(aw * 0.15, ah * 0.1);
+    P = [[0.2, 0.56], [0.5, 0.38], [0.8, 0.56]];
+  } else {
+    r = Math.min(ah * 0.15, aw * 0.1);
+    P = [[0.3, 0.6], [0.5, 0.3], [0.7, 0.6]];
+  }
+  for (var i = 0; i < 3; i++){
+    drums[i].x = ax + aw * P[i][0]; drums[i].y = ay + ah * P[i][1];
+    drums[i].r = r * (i === 1 ? 1.06 : 1);
+  }
+  U = r / 60;
+  // circumcircle
+  var a = drums[0], b = drums[1], c = drums[2];
+  var d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+  var ux = ((a.x*a.x + a.y*a.y) * (b.y - c.y) + (b.x*b.x + b.y*b.y) * (c.y - a.y) + (c.x*c.x + c.y*c.y) * (a.y - b.y)) / d;
+  var uy = ((a.x*a.x + a.y*a.y) * (c.x - b.x) + (b.x*b.x + b.y*b.y) * (a.x - c.x) + (c.x*c.x + c.y*c.y) * (b.x - a.x)) / d;
+  ringG.cx = ux; ringG.cy = uy; ringG.R = Math.hypot(a.x - ux, a.y - uy);
+  var thL = Math.atan2(a.y - uy, a.x - ux), thC = Math.atan2(b.y - uy, b.x - ux), thR = Math.atan2(c.y - uy, c.x - ux);
+  var d1 = mod(thC - thL, TAU), d2 = mod(thR - thL, TAU);
+  if (d1 < d2){ ringG.dir = 1; ringG.span = d2; ringG.uC = d1 / d2; }
+  else { ringG.dir = -1; ringG.span = mod(thL - thR, TAU); ringG.uC = mod(thL - thC, TAU) / ringG.span; }
+  ringG.thL = thL; ringG.uMax = TAU / ringG.span;
+  buildBg(); buildSprites();
+}
+function roadPt(u, wob){
+  var th = ringG.thL + ringG.dir * ringG.span * u;
+  var R = ringG.R * (1 + (wob || 0));
+  return { x: ringG.cx + Math.cos(th) * R, y: ringG.cy + Math.sin(th) * R, th: th };
+}
+var DRUM_U = function(i){ return i === 0 ? 0 : i === 1 ? ringG.uC : 1; };
+
+function buildBg(){
+  bgCanvas = document.createElement('canvas');
+  bgCanvas.width = cv.width; bgCanvas.height = cv.height;
+  var g = bgCanvas.getContext('2d');
+  g.fillStyle = '#f3eee2'; g.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+  var s = DPR;
+  // soft paper clouds
+  for (var i = 0; i < 26; i++){
+    var x = Math.random() * W * s, y = Math.random() * H * s, rr = rnd(60, 220) * s;
+    var gr = g.createRadialGradient(x, y, 0, x, y, rr);
+    var light = Math.random() < 0.5;
+    gr.addColorStop(0, light ? 'rgba(255,253,246,0.35)' : 'rgba(120,105,85,0.035)');
+    gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(x - rr, y - rr, rr * 2, rr * 2);
+  }
+  // fibers
+  g.lineCap = 'round';
+  for (i = 0; i < 420; i++){
+    var fx = Math.random() * W * s, fy = Math.random() * H * s, ang = Math.random() * TAU, ln = rnd(6, 30) * s;
+    g.strokeStyle = Math.random() < 0.6 ? 'rgba(110,95,75,0.05)' : 'rgba(255,255,250,0.5)';
+    g.lineWidth = rnd(0.4, 1.2) * s;
+    g.beginPath(); g.moveTo(fx, fy);
+    g.quadraticCurveTo(fx + Math.cos(ang + 0.6) * ln * 0.5, fy + Math.sin(ang + 0.6) * ln * 0.5, fx + Math.cos(ang) * ln, fy + Math.sin(ang) * ln);
+    g.stroke();
+  }
+  // speckles
+  for (i = 0; i < 900; i++){
+    g.fillStyle = 'rgba(60,50,40,' + rnd(0.02, 0.07).toFixed(3) + ')';
+    g.fillRect(Math.random() * W * s, Math.random() * H * s, s * rnd(0.5, 1.4), s * rnd(0.5, 1.4));
+  }
+  // vignette
+  var vg = g.createRadialGradient(W * s / 2, H * s / 2, Math.min(W, H) * s * 0.3, W * s / 2, H * s / 2, Math.max(W, H) * s * 0.75);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(70,55,40,0.08)');
+  g.fillStyle = vg; g.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+}
+
+// brush ring (enso) into context g, centred at 0,0
+function ensoStroke(g, r, wBase, gapStart, gapLen, seed, alpha, steps){
+  steps = steps || 120;
+  var outer = [], inner = [];
+  for (var k = 0; k <= steps; k++){
+    var p = k / steps;
+    var ang = gapStart + gapLen + p * (TAU - gapLen);
+    var press = Math.sin(Math.PI * Math.pow(p, 0.7));       // pressure profile
+    var w = wBase * (0.25 + 0.95 * press) * (0.85 + 0.3 * sr(seed + k));
+    var rr = r * (1 + 0.012 * (sr(seed + k * 3) - 0.5));
+    outer.push([Math.cos(ang) * (rr + w / 2), Math.sin(ang) * (rr + w / 2)]);
+    inner.push([Math.cos(ang) * (rr - w / 2), Math.sin(ang) * (rr - w / 2)]);
+  }
+  g.fillStyle = ink(alpha);
+  g.beginPath(); g.moveTo(outer[0][0], outer[0][1]);
+  for (k = 1; k < outer.length; k++) g.lineTo(outer[k][0], outer[k][1]);
+  for (k = inner.length - 1; k >= 0; k--) g.lineTo(inner[k][0], inner[k][1]);
+  g.closePath(); g.fill();
+  // dry brush streaks (kasure)
+  g.lineCap = 'round';
+  for (var s2 = 0; s2 < 4; s2++){
+    var off = (s2 - 1.5) * wBase * 0.22;
+    g.strokeStyle = 'rgba(243,238,226,' + (0.35 + 0.2 * sr(seed + s2)).toFixed(2) + ')';
+    g.lineWidth = Math.max(0.6, wBase * 0.06);
+    g.beginPath();
+    var started = false;
+    for (k = Math.floor(steps * 0.45); k <= steps; k++){
+      if (sr(seed + 999 + s2 * 200 + k) < 0.3){ started = false; continue; }
+      var p2 = k / steps, a2 = gapStart + gapLen + p2 * (TAU - gapLen);
+      var x = Math.cos(a2) * (r + off), y = Math.sin(a2) * (r + off);
+      if (!started){ g.moveTo(x, y); started = true; } else g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+}
+function buildSprites(){
+  for (var i = 0; i < 3; i++){
+    var d = drums[i], r = d.r;
+    var S = Math.ceil(r * 3.0 * DPR);
+    var c = document.createElement('canvas'); c.width = S; c.height = S;
+    var g = c.getContext('2d');
+    g.translate(S / 2, S / 2); g.scale(DPR, DPR);
+    // bleed halo (nijimi)
+    var hal = g.createRadialGradient(0, 0, r * 0.9, 0, 0, r * 1.38);
+    hal.addColorStop(0, 'rgba(22,19,17,0.10)'); hal.addColorStop(1, 'rgba(22,19,17,0)');
+    g.fillStyle = hal; g.beginPath(); g.arc(0, 0, r * 1.4, 0, TAU); g.fill();
+    // drum face wash
+    g.fillStyle = '#f4efe4'; g.beginPath(); g.arc(0, 0, r * 1.0, 0, TAU); g.fill();
+    var fw = g.createRadialGradient(r * 0.05, r * 0.08, r * 0.1, 0, 0, r);
+    var faceA = [0.06, 0.1, 0.035][i];
+    fw.addColorStop(0, 'rgba(22,19,17,0)');
+    fw.addColorStop(0.55, 'rgba(22,19,17,' + (faceA * 0.4).toFixed(3) + ')');
+    fw.addColorStop(0.85, 'rgba(22,19,17,' + faceA + ')');
+    fw.addColorStop(1, 'rgba(22,19,17,' + (faceA + 0.12).toFixed(3) + ')');
+    g.fillStyle = fw; g.beginPath(); g.arc(0, 0, r * 0.99, 0, TAU); g.fill();
+    // a few uneven wash blots inside the face (ink bleed)
+    for (var bk = 0; bk < 5; bk++){
+      var ba = sr(i * 50 + bk) * TAU, bd = r * (0.35 + 0.4 * sr(i * 50 + bk + 9)), brr = r * (0.18 + 0.2 * sr(i * 50 + bk + 17));
+      var bgr = g.createRadialGradient(Math.cos(ba) * bd, Math.sin(ba) * bd, 0, Math.cos(ba) * bd, Math.sin(ba) * bd, brr);
+      bgr.addColorStop(0, 'rgba(22,19,17,0.045)'); bgr.addColorStop(1, 'rgba(22,19,17,0)');
+      g.fillStyle = bgr; g.beginPath(); g.arc(Math.cos(ba) * bd, Math.sin(ba) * bd, brr, 0, TAU); g.fill();
+    }
+    if (i === 0){
+      ensoStroke(g, r, r * 0.2, -0.9, 0.5, 11, 0.88);
+      for (var k = 0; k < 14; k++){ var a = k / 14 * TAU; g.fillStyle = ink(0.55); g.beginPath(); g.arc(Math.cos(a) * r * 1.16, Math.sin(a) * r * 1.16, r * 0.035, 0, TAU); g.fill(); }
+    } else if (i === 1){
+      ensoStroke(g, r * 1.18, r * 0.08, 2.2, 0.9, 71, 0.35);
+      ensoStroke(g, r, r * 0.26, 1.9, 0.25, 41, 0.92);
+      for (k = 0; k < 20; k++){ a = k / 20 * TAU; g.fillStyle = ink(0.7); g.beginPath(); g.arc(Math.cos(a) * r * 0.82, Math.sin(a) * r * 0.82, r * 0.03, 0, TAU); g.fill(); }
+    } else {
+      ensoStroke(g, r, r * 0.16, 0.4, 0.9, 91, 0.8);
+      ensoStroke(g, r * 0.62, r * 0.05, 3.5, 1.4, 131, 0.28);
+      for (k = 0; k < 10; k++){ a = k / 10 * TAU + 0.3; g.fillStyle = ink(0.5); g.beginPath(); g.ellipse(Math.cos(a) * r * 1.17, Math.sin(a) * r * 1.17, r * 0.05, r * 0.025, a, 0, TAU); g.fill(); }
+    }
+    d.sprite = c; d.spriteS = S / DPR;
+  }
+  // ink blob sprite
+  var B = 64;
+  blobSprite = document.createElement('canvas'); blobSprite.width = B; blobSprite.height = B;
+  var bg = blobSprite.getContext('2d');
+  var gr = bg.createRadialGradient(B / 2, B / 2, 0, B / 2, B / 2, B / 2);
+  gr.addColorStop(0, 'rgba(22,19,17,0.95)'); gr.addColorStop(0.55, 'rgba(22,19,17,0.8)');
+  gr.addColorStop(0.8, 'rgba(22,19,17,0.25)'); gr.addColorStop(1, 'rgba(22,19,17,0)');
+  bg.fillStyle = gr; bg.beginPath(); bg.arc(B / 2, B / 2, B / 2, 0, TAU); bg.fill();
+}
+
+// ------------------------------------------------------------
+//  Effects
+// ------------------------------------------------------------
+function addRipple(x, y, r0, r1, dur, w, a){
+  if (ripples.length >= MAX_RIPPLES) ripples.shift();
+  ripples.push({ x: x, y: y, r0: r0, r1: r1, t: now, dur: dur, w: w, a: a });
+}
+function addParts(x, y, n, spd, size){
+  for (var k = 0; k < n; k++){
+    if (parts.length >= MAX_PARTS) parts.shift();
+    var ang = Math.random() * TAU, v = rnd(0.3, 1) * spd * U;
+    parts.push({ x: x, y: y, vx: Math.cos(ang) * v, vy: Math.sin(ang) * v, r: rnd(0.5, 1.3) * size * U, life: 1, dec: rnd(0.9, 1.6) });
+  }
+}
+function addStamp(nx, ny, r, ang, a){
+  if (stamps.length >= MAX_STAMPS) stamps.shift();
+  stamps.push({ nx: nx, ny: ny, r: r, ang: ang, a: a, t: now });
+}
+function toN(x, y){ return { nx: (x - ringG.cx) / ringG.R, ny: (y - ringG.cy) / ringG.R }; }
+function fromN(nx, ny){ return { x: ringG.cx + nx * ringG.R, y: ringG.cy + ny * ringG.R }; }
+
+// ------------------------------------------------------------
+//  Clock & scheduling
+// ------------------------------------------------------------
+function at(t, fn){ events.push({ t: t, fn: fn }); }
+function quantize(t){
+  var g = beat / 2, k = (t - t0) / g, prev = t0 + Math.floor(k) * g;
+  if (t - prev < 0.06) return t;
+  return prev + g;
+}
+function nextBeat(t){ var k = Math.ceil((t - t0) / beat - 0.001); return t0 + k * beat; }
+function setSong(i){
+  songIdx = i % SONGS.length; song = SONGS[songIdx]; beat = 60 / song.bpm;
+  t0 = now; last8 = -1;
+}
+
+// ------------------------------------------------------------
+//  Footprints
+// ------------------------------------------------------------
+function segCount(a, b){ return Math.abs(a - b) === 2 ? 2 : 1; }
+function emitRoad(from, to, level, kind, beatsPerSeg, delay, grp){
+  var f = { id: fpId++, road: true, from: from, to: to, u0: DRUM_U(from), u1: DRUM_U(to),
+            t0: now + (delay || 0), dur: beat * beatsPerSeg * segCount(from, to), level: level, kind: kind,
+            dirSign: DRUM_U(to) > DRUM_U(from) ? 1 : -1, crossed: false, pair: {}, lastStamp: -1, side: 1,
+            pulse: 0, grp: grp || 0, dead: false, u: DRUM_U(from), x: drums[from].x, y: drums[from].y };
+  fps.push(f);
+  if (level >= 2) thickenFor(f);
+  L('emit', { from: from, to: to, kind: kind, level: level, delay: +(delay || 0).toFixed(2) });
+  return f;
+}
+function emitStraight(px, py, to, dur, kind){
+  var n = toN(px, py);
+  var f = { id: fpId++, road: false, nx: n.nx, ny: n.ny, from: -1, to: to, t0: now, dur: dur, level: 1, kind: kind,
+            dirSign: 0, crossed: false, pair: {}, lastStamp: -1, side: 1, pulse: 0, grp: 0, dead: false, x: px, y: py };
+  fps.push(f);
+  return f;
+}
+function thickenFor(f){
+  var lo = Math.min(f.from, f.to), hi = Math.max(f.from, f.to);
+  var tgt = Math.min(2.4, 1 + 0.38 * (f.level - 1));
+  if (lo === 0 && hi >= 1) segThick[0] = Math.max(segThick[0], Math.min(2.4, segThick[0] + 0.12 * (f.level - 1)), tgt);
+  if (hi === 2 && lo <= 1) segThick[1] = Math.max(segThick[1], Math.min(2.4, segThick[1] + 0.12 * (f.level - 1)), tgt);
+  segThick[0] = Math.min(2.4, segThick[0]); segThick[1] = Math.min(2.4, segThick[1]);
+}
+function thickAt(i){ return i === 0 ? segThick[0] : i === 2 ? segThick[1] : (segThick[0] + segThick[1]) / 2; }
+function fpPos(f){
+  var p = clamp((now - f.t0) / f.dur, 0, 1);
+  // step-like pacing: slight surge on each beat
+  var nb = f.dur / beat;
+  var e = p + (nb > 0 ? 0.25 / (nb * TAU) * Math.sin(p * nb * TAU) : 0);
+  e = clamp(e, 0, 1);
+  if (f.road){
+    f.u = lerp(f.u0, f.u1, e);
+    var q = roadPt(f.u);
+    f.x = q.x; f.y = q.y; f.ang = q.th + (Math.PI / 2) * f.dirSign * ringG.dir;
+  } else {
+    var s = fromN(f.nx, f.ny), d = drums[f.to];
+    f.x = lerp(s.x, d.x, e); f.y = lerp(s.y, d.y, e); f.ang = Math.atan2(d.y - s.y, d.x - s.x);
+  }
+  return p;
+}
+function updateFootprints(){
+  var i, f;
+  for (i = 0; i < fps.length; i++){
+    f = fps[i]; if (f.dead || now < f.t0) continue;
+    var p = fpPos(f);
+    // stamp alternating marks along the way
+    var dist = p * f.dur;
+    var gap = beat * 0.22;
+    var idx = Math.floor(dist / gap);
+    if (idx !== f.lastStamp && p < 0.97 && p > 0.03){
+      f.lastStamp = idx; f.side = -f.side;
+      var off = (6 + 2 * f.level) * U * f.side;
+      var sx = f.x + Math.cos(f.ang + Math.PI / 2) * off * 0.6, sy = f.y + Math.sin(f.ang + Math.PI / 2) * off * 0.6;
+      var n = toN(sx, sy);
+      addStamp(n.nx, n.ny, (4 + 1.6 * f.level) * U / ringG.R, f.ang, f.kind === 'ring' ? 0.35 : 0.5);
+    }
+    if (p >= 1){ f.dead = true; arrive(f); }
+  }
+  // crossings between opposite-moving road footprints
+  for (i = 0; i < fps.length; i++){
+    var a = fps[i]; if (a.dead || !a.road || now < a.t0) continue;
+    for (var j = i + 1; j < fps.length; j++){
+      var b = fps[j]; if (b.dead || !b.road || now < b.t0 || a.dirSign === b.dirSign) continue;
+      var sgn = a.u > b.u ? 1 : -1;
+      var prev = a.pair[b.id];
+      if (prev !== undefined && prev !== sgn){
+        crossEvent(a, b);
+      }
+      a.pair[b.id] = sgn;
+    }
+  }
+  fps = fps.filter(function(f){ return !f.dead; });
+}
+function isPaired(f){
+  if (!f.road) return false;
+  for (var i = 0; i < fps.length; i++){
+    var g = fps[i];
+    if (g !== f && !g.dead && g.road && now >= g.t0 && g.dirSign !== f.dirSign) return true;
+  }
+  return false;
+}
+function crossEvent(a, b){
+  a.crossed = true; b.crossed = true; a.pulse = 1.6; b.pulse = 1.6;
+  var x = (a.x + b.x) / 2, y = (a.y + b.y) / 2;
+  sndClack();
+  addRipple(x, y, 6 * U, 46 * U, 0.8, 5 * U, 0.55);
+  addParts(x, y, 8, 70, 2.4);
+  var n = toN(x, y);
+  crossMarks.push({ nx: n.nx, ny: n.ny, t: now, ang: a.ang || 0 });
+  if (crossMarks.length > 8) crossMarks.shift();
+  L('cross', { a: a.from + '>' + a.to, b: b.from + '>' + b.to });
+}
+
+// ------------------------------------------------------------
+//  Game rules
+// ------------------------------------------------------------
+function pressDrum(i){
+  var d = drums[i];
+  // immediate: sink & bounce back, ink ring, touch click
+  d.s = -0.2; d.v = 0; d.held = 1;
+  sndTouch(i);
+  addRipple(d.x, d.y, d.r * 0.5, d.r * 1.05, 0.35, 6 * U, 0.35);
+  addParts(d.x, d.y - d.r * 0.2, 4, 60, 2);
+  var tq = quantize(now);
+  if (tq <= now + 0.001) mainHit(i);
+  else at(tq, function(){ mainHit(i); });
+}
+function mainHit(i){
+  var d = drums[i];
+  // ring phase: once the ring has been played, a drum begins the next song
+  if (phase === 'ring' && ringHits > 0){ newCycle(i); }
+  var repeated = (lastHitDrum === i && now - lastHitT < 6);
+  var level = repeated ? Math.min(4, d.level + 1) : 1;
+  d.level = level; lastHitDrum = i; lastHitT = now;
+  d.pool = Math.max(d.pool, level);
+  sndHit(i, level);
+  d.v -= 1.2;
+  addRipple(d.x, d.y, d.r * 0.9, d.r * (1.5 + 0.25 * level), 0.9, (7 + 3 * level) * U, 0.5);
+  addParts(d.x, d.y, 5 + level * 2, 90, 2.6);
+  L('hit', { drum: i, level: level, phase: phase });
+  if (i !== CEN) lastEdge = i;
+  if (repeated){
+    // grow the same strike point: feed the footprints that are still on the way
+    var mine = fps.filter(function(f){ return !f.dead && f.from === i && f.road && f.kind !== 'replay' && f.kind !== 'chase'; });
+    if (mine.length){
+      var g = mine[mine.length - 1].grp;
+      mine.forEach(function(f){ if (f.grp === g){ f.level = level; f.pulse = 1.4; thickenFor(f); } });
+      L('grow', { drum: i, level: level });
+      return;
+    }
+  }
+  if (phase === 'play' && !repeated){
+    if (history.indexOf(i) < 0){
+      history.push(i);
+      if (history.length === 1){ origin = i; originT = now; }
+      L('history', { order: history.join('') });
+      if (history.length === 3){ startChase(i); return; }
+    }
+  }
+  route(i, level, phase === 'play' ? 'normal' : 'free');
+}
+function route(i, level, kind){
+  var grp = groupId++;
+  if (i === LEFT) emitRoad(LEFT, RIGHT, level, kind, 2, 0, grp);
+  else if (i === RIGHT) emitRoad(RIGHT, LEFT, level, kind, 2, 0, grp);
+  else {
+    // centre splits in two; the edge touched most recently leads, the other follows a beat later
+    var lead = lastEdge >= 0 ? lastEdge : memEdge;
+    if (lead < 0){
+      emitRoad(CEN, LEFT, level, 'branch', 2, 0, grp);
+      emitRoad(CEN, RIGHT, level, 'branch', 2, 0, grp);
+      L('branch', { lead: -1 });
+    } else {
+      var other = lead === LEFT ? RIGHT : LEFT;
+      emitRoad(CEN, lead, level, 'branch', 2, 0, grp).lead = true;
+      emitRoad(CEN, other, level, 'branch', 2, beat, grp);
+      L('branch', { lead: lead });
+    }
+  }
+}
+function arrive(f){
+  var d = drums[f.to];
+  if (f.kind === 'chase'){ catchUp(f); return; }
+  if (f.kind === 'replay'){ replayStep(f.step + 1); return; }
+  if (f.kind === 'ring'){
+    var k = f.order;
+    sndChord(f.to, k);
+    d.v += 1.4; addRipple(d.x, d.y, d.r * 0.8, d.r * 1.7, 0.9, 7 * U, 0.45);
+    addParts(d.x, d.y, 6, 80, 2.4);
+    lastReceiver = f.to;
+    L('ringArrive', { drum: f.to, order: k });
+    return;
+  }
+  // merge: two footprints arriving at the same drum on the same beat → one thick strike
+  if (now - d.lastArr < beat * 0.3){
+    sndMerge(f.to);
+    d.v += 2.6; d.pool = Math.max(d.pool, 3);
+    addRipple(d.x, d.y, d.r * 0.6, d.r * 2.4, 1.3, 14 * U, 0.6);
+    addRipple(d.x, d.y, d.r * 0.9, d.r * 2.0, 1.0, 5 * U, 0.4);
+    addParts(d.x, d.y, 16, 150, 3.4);
+    d.lastArr = -9;
+    L('merge', { drum: f.to });
+    return;
+  }
+  d.lastArr = now;
+  var th = thickAt(f.to);
+  sndReply(f.to, f.level, th, f.crossed);
+  d.v += 1.1 + 0.3 * f.level;
+  d.pool = Math.max(d.pool, f.level * 0.8);
+  addRipple(d.x, d.y, d.r * 0.85, d.r * (1.35 + 0.2 * f.level), 0.8 + 0.2 * f.level, (5 + 3 * f.level) * U, 0.45);
+  addParts(d.x, d.y, 4 + f.level * 2, 70, 2.2);
+  L('reply', { drum: f.to, from: f.from, level: f.level, crossed: f.crossed, kind: f.kind });
+}
+function startChase(i){
+  phase = 'chase';
+  var f = emitRoad(i, origin, 1, 'chase', 1.5, 0, groupId++);
+  f.chase = true;
+  L('chase', { from: i, to: origin, order: history.join('') });
+}
+function catchUp(f){
+  var d = drums[origin];
+  sndCatch();
+  d.v += 2.2;
+  addRipple(d.x, d.y, d.r * 0.4, d.r * 2.6, 1.4, 12 * U, 0.55);
+  addRipple(d.x, d.y, d.r * 1.1, d.r * 1.9, 1.0, 4 * U, 0.5);
+  addParts(d.x, d.y, 14, 120, 3);
+  L('catch', { origin: origin });
+  prevOrder = history.slice();
+  var tb = nextBeat(now + 0.05);
+  at(tb, function(){
+    phase = 'flip'; flipT0 = now; flipDur = beat * 2; flipP = 0; sndWhoosh();
+    roadFlipTarget = 1;
+    L('flip', {});
+    at(now + flipDur, function(){
+      phase = 'reverse'; flipP = 0;
+      revOrder = history.slice().reverse();
+      L('reverse', { order: revOrder.join('') });
+      at(nextBeat(now + 0.02), function(){ replayStep(0); });
+    });
+  });
+}
+function replayStep(k){
+  var i = revOrder[k], d = drums[i];
+  var last = k === revOrder.length - 1;
+  sndReply(i, last ? 3 : 1, thickAt(i), false);
+  sndHit(i, 1);
+  d.v += 2.0;
+  addRipple(d.x, d.y, d.r * 0.7, d.r * 2.0, 1.0, 9 * U, 0.55);
+  addParts(d.x, d.y, 10, 110, 2.8);
+  L('replay', { drum: i, step: k });
+  if (!last){
+    var f = emitRoad(i, revOrder[k + 1], 1, 'replay', 1.5, 0, groupId++);
+    f.step = k;
+  } else {
+    // the road closes into one big ring
+    at(now + beat, function(){
+      phase = 'closing'; ringPTarget = 1; L('closing', {});
+      at(now + beat * 2, function(){
+        phase = 'ring'; ringHits = 0; ringP = 1;
+        origin = -1;
+        L('ring', {});
+      });
+    });
+  }
+}
+function pressRing(x, y){
+  var ang = Math.atan2(y - ringG.cy, x - ringG.cx);
+  ringWob = { a: 0.07, ang: ang, t: now, dist: Math.hypot(x - ringG.cx, y - ringG.cy) / ringG.R };
+  sndTouch(1);
+  addRipple(x, y, 4 * U, 30 * U, 0.4, 4 * U, 0.3);
+  var tq = quantize(now);
+  var fn = function(){
+    sndMembrane();
+    ringWob.a = 0.12; ringWob.t = now;
+    addRipple(ringG.cx, ringG.cy, ringG.R * 0.3, ringG.R * 1.25, 1.2, 12 * U, 0.35);
+    addRipple(x, y, 6 * U, ringG.R * 0.7, 1.0, 8 * U, 0.45);
+    addParts(x, y, 12, 120, 2.6);
+    // send to the three drums; nearer drums answer first
+    var ds = [0, 1, 2].map(function(i){ return { i: i, dist: Math.hypot(drums[i].x - x, drums[i].y - y) }; });
+    ds.sort(function(a, b){ return a.dist - b.dist; });
+    ds.forEach(function(o, k){
+      var dur = beat * (1 + k * 0.5 + 0.6 * o.dist / ringG.R);
+      dur = Math.round(dur / (beat / 2)) * (beat / 2);
+      var f = emitStraight(x, y, o.i, dur, 'ring');
+      f.order = k;
+    });
+    ringHits++;
+    L('ringHit', { order: ds.map(function(o){ return o.i; }).join(''), hits: ringHits });
+  };
+  if (tq <= now + 0.001) fn(); else at(tq, fn);
+}
+function newCycle(start){
+  cycle++;
+  ghostOrder = prevOrder ? prevOrder.slice() : null; ghostA = 1; ghostRingA = 1;
+  memEdge = -1;
+  if (prevOrder){ for (var k = prevOrder.length - 1; k >= 0; k--){ if (prevOrder[k] !== CEN){ memEdge = prevOrder[k]; break; } } }
+  var perm = prevOrder ? permIndex(prevOrder) : 0;
+  setSong((perm + cycle) % SONGS.length);
+  segThick = segThick.map(function(t){ return 1 + (t - 1) * 0.6; });
+  history = []; origin = -1; lastEdge = memEdge; phase = 'play';
+  ringPTarget = 0; roadFlipTarget = 0; ringHits = 0; lastHitDrum = -1;
+  // fade old footprint marks into the background memory
+  stamps.forEach(function(s){ s.a *= 0.5; });
+  L('newCycle', { cycle: cycle, start: start, song: songIdx, memEdge: memEdge });
+}
+function permIndex(o){ var key = o.join(''); return ['012','021','102','120','201','210'].indexOf(key) + 0; }
+
+// ------------------------------------------------------------
+//  Guidance (exactly one highlighted target)
+// ------------------------------------------------------------
+function currentTarget(){
+  if (phase === 'chase' || phase === 'flip' || phase === 'closing') return null;
+  if (phase === 'reverse') return null;
+  if (phase === 'ring') return ringHits === 0 ? 'ring' : (lastReceiver >= 0 ? lastReceiver : 'ring');
+  if (history.length === 0){
+    if (cycle === 0) return LEFT;
+    return lastReceiver >= 0 ? lastReceiver : LEFT;
+  }
+  // a footprint on its way to an untouched drum invites an interruption
+  for (var i = fps.length - 1; i >= 0; i--){
+    var f = fps[i];
+    if (!f.dead && f.road && now >= f.t0 && history.indexOf(f.to) < 0 && f.kind !== 'chase') return f.to;
+  }
+  var pref = [CEN, RIGHT, LEFT];
+  for (i = 0; i < 3; i++) if (history.indexOf(pref[i]) < 0) return pref[i];
+  return null;
+}
+function targetPos(tg){
+  if (tg === null || tg === undefined) return null;
+  if (tg === 'ring') return { x: ringG.cx, y: ringG.cy + ringG.R * 0.35, r: ringG.R * 0.5 };
+  return { x: drums[tg].x, y: drums[tg].y, r: drums[tg].r };
+}
+function updateHand(){
+  var tg = currentTarget();
+  var key = (tg === null ? 'n' : tg) + ':' + phase + ':' + (phase === 'play' ? history.length : ringHits > 0 ? 1 : 0);
+  if (!hand && tg !== null && now - lastInput > 4 && !handShown[key] && events.length === 0){
+    // the first demo only shows on the left drum; later demos follow the target
+    if (!firstTouched && tg !== LEFT) return;
+    handShown[key] = 1;
+    hand = { t: now, tg: tg };
+    L('hand', { target: tg });
+  }
+  if (hand && now - hand.t > 2.2) hand = null;
+}
+
+// ------------------------------------------------------------
+//  Input
+// ------------------------------------------------------------
+var pointers = {};
+function hitTest(x, y){
+  var best = -1, bd = 1e9;
+  for (var i = 0; i < 3; i++){
+    var d = drums[i], dd = Math.hypot(x - d.x, y - d.y);
+    if (dd < d.r * 1.32 && dd < bd){ bd = dd; best = i; }
+  }
+  if (best >= 0) return best;
+  if (phase === 'ring' && Math.hypot(x - ringG.cx, y - ringG.cy) < ringG.R * 1.08) return 'ring';
+  return null;
+}
+function onDown(e){
+  e.preventDefault();
+  initAudio();
+  var x = e.clientX, y = e.clientY;
+  lastInput = now; hand = null;
+  var h = hitTest(x, y);
+  pointers[e.pointerId] = { h: h };
+  if (h === 'ring') pressRing(x, y);
+  else if (h !== null){ firstTouched = true; pressDrum(h); }
+  else {
+    // background: only a tiny shiver
+    addRipple(x, y, 3 * U, 16 * U, 0.5, 2 * U, 0.12);
+    var near = 0, nd = 1e9;
+    for (var i = 0; i < 3; i++){ var dd = Math.hypot(x - drums[i].x, y - drums[i].y); if (dd < nd){ nd = dd; near = i; } }
+    drums[near].tiltV += 0.02 * (x < drums[near].x ? -1 : 1);
+  }
+  try { cv.setPointerCapture(e.pointerId); } catch (er) {}
+}
+function onUp(e){
+  var p = pointers[e.pointerId];
+  if (p && typeof p.h === 'number') drums[p.h].held = 0;
+  delete pointers[e.pointerId];
+  if (Object.keys(pointers).length === 0) drums.forEach(function(d){ d.held = 0; });
+}
+cv.addEventListener('pointerdown', onDown, { passive: false });
+cv.addEventListener('pointerup', onUp);
+cv.addEventListener('pointercancel', onUp);
+cv.addEventListener('lostpointercapture', onUp);
+cv.addEventListener('pointerleave', onUp);
+window.addEventListener('blur', function(){ pointers = {}; drums.forEach(function(d){ d.held = 0; }); });
+['touchstart', 'touchmove', 'touchend', 'gesturestart', 'gesturechange', 'dblclick'].forEach(function(n){
+  document.addEventListener(n, function(e){ if (e.cancelable) e.preventDefault(); }, { passive: false });
+});
+document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+window.addEventListener('wheel', function(e){ if (e.cancelable) e.preventDefault(); }, { passive: false });
+
+// ------------------------------------------------------------
+//  Update
+// ------------------------------------------------------------
+function update(dt){
+  // song ticks (8th notes)
+  var k8 = Math.floor((now - t0) / (beat / 2));
+  var guard = 0;
+  while (last8 < k8 && guard++ < 4){
+    last8++;
+    onTick(last8);
+  }
+  last8 = Math.max(last8, k8);
+  // events
+  if (events.length){
+    var due = [], rest = [];
+    for (var i = 0; i < events.length; i++) (events[i].t <= now ? due : rest).push(events[i]);
+    if (due.length){
+      events = rest;
+      due.sort(function(a, b){ return a.t - b.t; });
+      for (i = 0; i < due.length; i++) due[i].fn();
+    }
+  }
+  updateFootprints();
+  // drum springs & tilt
+  var bp = mod((now - t0) / beat, 1);
+  for (i = 0; i < 3; i++){
+    var d = drums[i];
+    var acc = -180 * d.s - 11 * d.v;
+    d.v += acc * dt; d.s += d.v * dt;
+    if (d.held && d.s > -0.06) d.s = lerp(d.s, -0.06, 0.3);
+    d.s = clamp(d.s, -0.35, 0.35);
+    // waiting tilt toward incoming footprints
+    var tgtTilt = 0;
+    for (var j = 0; j < fps.length; j++){
+      var f = fps[j];
+      if (f.to === i && now >= f.t0){
+        var pr = clamp((now - f.t0) / f.dur, 0, 1);
+        tgtTilt += (f.x < d.x ? -1 : 1) * 0.12 * pr;
+      }
+    }
+    tgtTilt = clamp(tgtTilt, -0.2, 0.2);
+    var ta = -60 * (d.tilt - tgtTilt) - 7 * d.tiltV;
+    d.tiltV += ta * dt; d.tilt += d.tiltV * dt;
+    d.pool = Math.max(0, d.pool - dt * 0.12);
+    if (lastHitDrum !== i && d.level > 0 && now - lastHitT > 0.1) d.level = d.level; // level kept until a new strike
+  }
+  segShown[0] = lerp(segShown[0], segThick[0], 0.06);
+  segShown[1] = lerp(segShown[1], segThick[1], 0.06);
+  roadFlip = lerp(roadFlip, roadFlipTarget, 0.05);
+  ringP = lerp(ringP, ringPTarget, phase === 'closing' ? 0.045 : 0.03);
+  if (ringPTarget === 0 && ringP < 0.003) ringP = 0;
+  if (phase === 'flip') flipP = clamp((now - flipT0) / flipDur, 0, 1);
+  ghostA = Math.max(0.35, ghostA - dt * 0.05);
+  // particles
+  for (i = parts.length - 1; i >= 0; i--){
+    var p = parts[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92;
+    p.life -= dt * p.dec;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  for (i = ripples.length - 1; i >= 0; i--) if (now - ripples[i].t > ripples[i].dur) ripples.splice(i, 1);
+  for (i = 0; i < fps.length; i++) fps[i].pulse = Math.max(0, fps[i].pulse - dt * 3);
+  updateHand();
+}
+function onTick(k){
+  sndBg(k);
+  var even = k % 2 === 0;
+  for (var i = 0; i < fps.length; i++){
+    var f = fps[i];
+    if (f.dead || now < f.t0) continue;
+    var src = f.from >= 0 ? f.from : 1;
+    if (isPaired(f)){
+      // call & response on the road: one side on the beat, the other between beats
+      if ((f.dirSign > 0) === even){ sndStep(src, true); f.pulse = 1; }
+    } else if (even){
+      sndStep(src, false); f.pulse = 0.7;
+    }
+  }
+}
+
+// ------------------------------------------------------------
+//  Render
+// ------------------------------------------------------------
+function drawRoad(){
+  var steps = 90, i, u, p, w;
+  var base = 13 * U;
+  var outer = [], inner = [];
+  var wob = ringWobAt;
+  for (i = 0; i <= steps; i++){
+    u = i / steps;
+    var th = (u < ringG.uC) ? lerp(segShown[0], segShown[0], 0) : segShown[1];
+    // blend thickness smoothly around the centre drum
+    var bl = clamp((u - ringG.uC) / 0.08 + 0.5, 0, 1);
+    th = lerp(segShown[0], segShown[1], bl);
+    var press = lerp(1.0 - 0.45 * u, 0.55 + 0.45 * u, roadFlip);   // the brush starts heavy at the sender side
+    w = base * th * press * (0.85 + 0.3 * sr(i * 7 + 3));
+    p = roadPt(u, wob(u));
+    var nx = Math.cos(p.th), ny = Math.sin(p.th);
+    outer.push([p.x + nx * w / 2, p.y + ny * w / 2]);
+    inner.push([p.x - nx * w / 2, p.y - ny * w / 2]);
+  }
+  // nijimi halo
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = ink(0.05);
+  ctx.lineWidth = base * 2.6 * Math.max(segShown[0], segShown[1]);
+  ctx.beginPath();
+  for (i = 0; i <= steps; i += 3){ p = roadPt(i / steps, wob(i / steps)); if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }
+  ctx.stroke();
+  ctx.fillStyle = ink(0.62);
+  ctx.beginPath(); ctx.moveTo(outer[0][0], outer[0][1]);
+  for (i = 1; i < outer.length; i++) ctx.lineTo(outer[i][0], outer[i][1]);
+  for (i = inner.length - 1; i >= 0; i--) ctx.lineTo(inner[i][0], inner[i][1]);
+  ctx.closePath(); ctx.fill();
+  // kasure streaks
+  ctx.strokeStyle = 'rgba(243,238,226,0.55)';
+  ctx.lineWidth = Math.max(0.7, 1.1 * U);
+  for (var s = 0; s < 3; s++){
+    var off = (s - 1) * 0.28;
+    ctx.beginPath();
+    var started = false;
+    for (i = 0; i <= steps; i++){
+      u = i / steps;
+      var fade = lerp(u, 1 - u, roadFlip);                      // dry at the receiver end
+      if (sr(500 + s * 131 + i) > 0.25 + fade * 0.7){ started = false; continue; }
+      p = roadPt(u, wob(u));
+      var ww = base * lerp(segShown[0], segShown[1], u) * off;
+      var x = p.x + Math.cos(p.th) * ww, y = p.y + Math.sin(p.th) * ww;
+      if (!started){ ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+var ringWobAt = function(){ return 0; };
+function makeWob(){
+  var age = now - ringWob.t;
+  var A = ringWob.a * Math.exp(-age * 2.2) * Math.cos(age * 14);
+  if (Math.abs(A) < 0.0005 || phase !== 'ring'){ ringWobAt = function(){ return 0; }; return; }
+  var ang0 = ringWob.ang;
+  ringWobAt = function(u){
+    var th = ringG.thL + ringG.dir * ringG.span * u;
+    var dd = Math.atan2(Math.sin(th - ang0), Math.cos(th - ang0));
+    return A * (0.6 * Math.exp(-dd * dd * 2.5) - 0.2) + A * 0.25 * Math.cos(3 * th + age * 5);
+  };
+}
+function drawRingClose(){
+  if (ringP <= 0.002 && ghostRingA <= 0.002) return;
+  var steps = 70, i, u, p;
+  var base = 15 * U * (segShown[0] + segShown[1]) / 2;
+  var span = ringG.uMax - 1;
+  if (ringP > 0.002){
+    // interior membrane wash
+    if (ringP > 0.6){
+      ctx.fillStyle = ink(0.035 * (ringP - 0.6) / 0.4 + (Math.abs(ringWobAt(0.5)) * 0.3));
+      ctx.beginPath();
+      for (i = 0; i <= 120; i++){ u = i / 120 * ringG.uMax; p = roadPt(u, ringWobAt(u)); if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }
+      ctx.closePath(); ctx.fill();
+    }
+    // closing stroke grows from both ends toward the bottom
+    var half = span / 2 * ringP;
+    var outer = [], inner = [];
+    var segs = [[1, 1 + half], [ringG.uMax - half, ringG.uMax]];
+    ctx.fillStyle = ink(0.6);
+    for (var sgi = 0; sgi < 2; sgi++){
+      outer = []; inner = [];
+      var a0 = segs[sgi][0], a1 = segs[sgi][1];
+      for (i = 0; i <= steps; i++){
+        u = lerp(a0, a1, i / steps);
+        var tip = sgi === 0 ? i / steps : 1 - i / steps;
+        var w = base * (1 - 0.55 * tip * (1 - ringP * 0.6)) * (0.85 + 0.3 * sr(900 + sgi * 97 + i));
+        p = roadPt(u, ringWobAt(u));
+        var nx = Math.cos(p.th), ny = Math.sin(p.th);
+        outer.push([p.x + nx * w / 2, p.y + ny * w / 2]); inner.push([p.x - nx * w / 2, p.y - ny * w / 2]);
+      }
+      ctx.beginPath(); ctx.moveTo(outer[0][0], outer[0][1]);
+      for (i = 1; i < outer.length; i++) ctx.lineTo(outer[i][0], outer[i][1]);
+      for (i = inner.length - 1; i >= 0; i--) ctx.lineTo(inner[i][0], inner[i][1]);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+}
+function drawGhost(){
+  // previous round's ring and order — a faint memory under the new song
+  if (cycle > 0){
+    ctx.strokeStyle = ink(0.06 * ghostA);
+    ctx.lineWidth = 3 * U; ctx.setLineDash([2 * U, 7 * U]);
+    ctx.beginPath(); ctx.arc(ringG.cx, ringG.cy, ringG.R * 1.0, 0, TAU); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (ghostOrder && phase !== 'ring'){
+    // the order of the last round as a thin outer trail: thick where it started, thin where it ended
+    var pts = ghostOrder.map(function(i){
+      var d = drums[i], ang = Math.atan2(d.y - ringG.cy, d.x - ringG.cx);
+      var rr = ringG.R + d.r * 1.55;
+      return { x: ringG.cx + Math.cos(ang) * rr, y: ringG.cy + Math.sin(ang) * rr };
+    });
+    ctx.lineCap = 'round';
+    for (var k = 0; k < pts.length - 1; k++){
+      var a = pts[k], b = pts[k + 1];
+      for (var s = 0; s < 10; s++){
+        var t = s / 10, t2 = (s + 1) / 10;
+        ctx.strokeStyle = ink(0.13 * ghostA * (1 - (k + t) / 2.4));
+        ctx.lineWidth = (5 - 3 * ((k + t) / 2)) * U;
+        ctx.beginPath(); ctx.moveTo(lerp(a.x, b.x, t), lerp(a.y, b.y, t)); ctx.lineTo(lerp(a.x, b.x, t2), lerp(a.y, b.y, t2)); ctx.stroke();
+      }
+    }
+    ctx.fillStyle = ink(0.18 * ghostA);
+    ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, 6 * U, 0, TAU); ctx.fill();
+  }
+}
+function drawStamps(){
+  var bw = 64;
+  for (var i = 0; i < stamps.length; i++){
+    var s = stamps[i];
+    var age = now - s.t;
+    var a = s.a * Math.max(0.08, 1 - age / 9);
+    if (a <= 0.01) continue;
+    var p = fromN(s.nx, s.ny), r = s.r * ringG.R;
+    ctx.globalAlpha = a;
+    var ca = Math.cos(s.ang) * DPR, sa = Math.sin(s.ang) * DPR;
+    ctx.setTransform(ca * 1.4, sa * 1.4, -sa * 0.8, ca * 0.8, p.x * DPR, p.y * DPR);
+    ctx.drawImage(blobSprite, -r, -r, r * 2, r * 2);
+  }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalAlpha = 1;
+  for (i = 0; i < crossMarks.length; i++){
+    var c = crossMarks[i], age2 = now - c.t, al = 0.4 * Math.max(0.12, 1 - age2 / 10);
+    var q = fromN(c.nx, c.ny), rr = 10 * U;
+    ctx.strokeStyle = ink(al); ctx.lineWidth = 3 * U; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(q.x - rr, q.y - rr * 0.6); ctx.quadraticCurveTo(q.x, q.y + rr * 0.2, q.x + rr, q.y + rr * 0.6);
+    ctx.moveTo(q.x - rr, q.y + rr * 0.6); ctx.quadraticCurveTo(q.x, q.y - rr * 0.2, q.x + rr, q.y - rr * 0.6);
+    ctx.stroke();
+  }
+}
+function drawDrum(d, tg){
+  var bp = mod((now - t0) / beat, 1);
+  var breath = Math.exp(-bp * 5);
+  var isT = tg === d.i;
+  var sc = 1 + (isT ? 0.07 : 0.02) * breath;
+  var bob = isT ? -d.r * 0.07 * breath : 0;
+  var s = d.s;
+  var sx = sc * (1 - s * 0.55), sy = sc * (1 + s);
+  ctx.save();
+  ctx.translate(d.x, d.y + bob - s * d.r * 0.3);
+  ctx.rotate(d.tilt);
+  // target halo: soft ink ring that breathes outward
+  if (isT){
+    var hr = d.r * (1.25 + 0.35 * bp);
+    ctx.strokeStyle = ink(0.22 * (1 - bp));
+    ctx.lineWidth = (6 - 4 * bp) * U;
+    ctx.beginPath(); ctx.arc(0, 0, hr, 0, TAU); ctx.stroke();
+  }
+  ctx.scale(sx, sy);
+  var S = d.spriteS;
+  ctx.drawImage(d.sprite, -S / 2, -S / 2, S, S);
+  // growing strike pool on the face
+  if (d.pool > 0.05){
+    var pr = d.r * (0.12 + 0.09 * Math.min(4, d.pool));
+    ctx.globalAlpha = Math.min(0.75, 0.25 + d.pool * 0.15);
+    ctx.drawImage(blobSprite, -pr, -pr, pr * 2, pr * 2);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+  // origin marker: a slowly turning ink ring
+  if (d.i === origin && (phase === 'play' || phase === 'chase')){
+    var rot = (now - originT) * 0.8;
+    ctx.save(); ctx.translate(d.x, d.y); ctx.rotate(rot);
+    ctx.strokeStyle = ink(0.45); ctx.lineWidth = 4 * U; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(0, 0, d.r * 1.45, 0, TAU * 0.78); ctx.stroke();
+    ctx.lineWidth = 1.6 * U;
+    ctx.beginPath(); ctx.arc(0, 0, d.r * 1.55, TAU * 0.2, TAU * 0.9); ctx.stroke();
+    ctx.restore();
+  }
+}
+function drawHeads(){
+  for (var i = 0; i < fps.length; i++){
+    var f = fps[i];
+    if (f.dead || now < f.t0) continue;
+    var r = (7 + 3.2 * f.level) * U * (1 + 0.35 * f.pulse);
+    if (f.kind === 'chase'){
+      // chaser: an ink ring hunting for the first strike
+      ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(now * 6);
+      ctx.strokeStyle = ink(0.8); ctx.lineWidth = 4.5 * U; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.arc(0, 0, 14 * U * (1 + 0.2 * f.pulse), 0, TAU * 0.82); ctx.stroke();
+      ctx.restore();
+      var o = drums[origin];
+      if (o){
+        ctx.strokeStyle = ink(0.18); ctx.lineWidth = 2 * U; ctx.setLineDash([3 * U, 6 * U]);
+        ctx.beginPath(); ctx.arc(o.x, o.y, o.r * (1.45 + 0.2 * Math.sin(now * 8)), 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+      }
+      continue;
+    }
+    ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(f.ang || 0);
+    ctx.scale(1.25 + 0.15 * Math.sin(now * 9 + f.id), 0.9);
+    ctx.globalAlpha = f.kind === 'ring' ? 0.7 : 0.95;
+    ctx.drawImage(blobSprite, -r, -r, r * 2, r * 2);
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    if (f.crossed){
+      ctx.strokeStyle = ink(0.3); ctx.lineWidth = 1.5 * U;
+      ctx.beginPath(); ctx.arc(f.x, f.y, r * 1.6, 0, TAU); ctx.stroke();
+    }
+  }
+}
+function drawRipples(){
+  for (var i = 0; i < ripples.length; i++){
+    var r = ripples[i], p = clamp((now - r.t) / r.dur, 0, 1);
+    var e = 1 - Math.pow(1 - p, 2.2);
+    var rad = lerp(r.r0, r.r1, e);
+    ctx.strokeStyle = ink(r.a * (1 - p));
+    ctx.lineWidth = Math.max(0.5, r.w * (1 - p * 0.8));
+    ctx.beginPath(); ctx.arc(r.x, r.y, rad, 0, TAU); ctx.stroke();
+  }
+}
+function drawParts(){
+  for (var i = 0; i < parts.length; i++){
+    var p = parts[i];
+    ctx.fillStyle = ink(0.7 * p.life);
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+}
+function drawHand(){
+  if (!hand) return;
+  var tp = targetPos(hand.tg); if (!tp) return;
+  var a = now - hand.t;
+  var x, y, press = 0, alpha;
+  var sx = tp.x + tp.r * 0.9, sy = tp.y + tp.r * 1.3;
+  if (a < 0.7){ var e = a / 0.7; e = e * e * (3 - 2 * e); x = lerp(sx, tp.x + tp.r * 0.1, e); y = lerp(sy, tp.y + tp.r * 0.15, e); }
+  else { x = tp.x + tp.r * 0.1; y = tp.y + tp.r * 0.15; }
+  if (a > 0.75 && a < 1.15) press = Math.sin((a - 0.75) / 0.4 * Math.PI);
+  alpha = a < 0.3 ? a / 0.3 : a > 1.7 ? Math.max(0, 1 - (a - 1.7) / 0.5) : 1;
+  if (a > 0.85 && !hand.rip){ hand.rip = 1; addRipple(tp.x, tp.y, tp.r * 0.4, tp.r * 1.1, 0.6, 4 * U, 0.25); }
+  var k = U * 1.1 * (1 - 0.12 * press);
+  ctx.save(); ctx.translate(x, y); ctx.rotate(-0.35); ctx.scale(k, k);
+  ctx.globalAlpha = alpha;
+  // a soft wash hand with one pointing finger
+  ctx.fillStyle = 'rgba(232,226,212,0.95)';
+  ctx.strokeStyle = ink(0.55); ctx.lineWidth = 3.2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-7, 0); ctx.quadraticCurveTo(-8, -6, 0, -6); ctx.quadraticCurveTo(8, -6, 7, 0);
+  ctx.lineTo(8, 34); ctx.quadraticCurveTo(22, 30, 30, 40); ctx.quadraticCurveTo(38, 52, 34, 70);
+  ctx.quadraticCurveTo(30, 90, 8, 92); ctx.quadraticCurveTo(-16, 92, -20, 70);
+  ctx.quadraticCurveTo(-24, 52, -8, 44); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = ink(0.1); ctx.beginPath(); ctx.ellipse(0, 2, 4, 3, 0, 0, TAU); ctx.fill();
+  ctx.restore(); ctx.globalAlpha = 1;
+}
+function render(){
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (bgCanvas) ctx.drawImage(bgCanvas, 0, 0, W, H);
+  makeWob();
+  drawGhost();
+  var tg = currentTarget();
+  ctx.save();
+  if (phase === 'flip'){
+    // the whole stage turns over once
+    var e = flipP * flipP * (3 - 2 * flipP);
+    var cx = ringG.cx, cy = (drums[0].y + drums[1].y) / 2;
+    ctx.translate(cx, cy);
+    ctx.scale(Math.cos(e * TAU), 1 - 0.1 * Math.sin(e * Math.PI));
+    ctx.translate(-cx, -cy);
+  }
+  drawRingClose();
+  drawRoad();
+  drawStamps();
+  // ring target glow
+  if (tg === 'ring'){
+    var bp = mod((now - t0) / beat, 1);
+    ctx.strokeStyle = ink(0.2 * (1 - bp)); ctx.lineWidth = (8 - 6 * bp) * U;
+    ctx.beginPath(); ctx.arc(ringG.cx, ringG.cy, ringG.R * (0.55 + 0.4 * bp), 0, TAU); ctx.stroke();
+  }
+  for (var i = 0; i < 3; i++) drawDrum(drums[i], tg);
+  drawHeads();
+  ctx.restore();
+  drawRipples();
+  drawParts();
+  drawHand();
+}
+
+// ------------------------------------------------------------
+//  Loop
+// ------------------------------------------------------------
+var running = true, lastFrame = 0, frames = 0;
+function loop(ts){
+  if (!running) return;
+  if (!lastFrame) lastFrame = ts;
+  var dt = Math.min(0.05, Math.max(0, (ts - lastFrame) / 1000)) * speed;
+  lastFrame = ts;
+  now += dt;
+  update(dt);
+  render();
+  frames++;
+  requestAnimationFrame(loop);
+}
+document.addEventListener('visibilitychange', function(){
+  if (document.hidden){
+    running = false;
+    pointers = {}; drums.forEach(function(d){ d.held = 0; });
+    if (ac && ac.state === 'running'){ try { ac.suspend(); } catch (e) {} }
+  } else if (!running){
+    running = true; lastFrame = 0;
+    if (ac){ try { ac.resume(); } catch (e) {} }
+    requestAnimationFrame(loop);
+  }
+});
+var rzT = 0;
+function onResize(){ clearTimeout(rzT); rzT = setTimeout(layout, 60); }
+window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', onResize);
+layout();
+requestAnimationFrame(loop);
+
+// test / inspection hook (read-only snapshot + speed control)
+window.__gf = {
+  state: function(){
+    return { phase: phase, history: history.slice(), cycle: cycle, ringHits: ringHits, song: songIdx,
+      fps: fps.map(function(f){ return { from: f.from, to: f.to, kind: f.kind, level: f.level }; }),
+      segThick: segThick.slice(), lastReceiver: lastReceiver, target: currentTarget(), now: now, frames: frames,
+      parts: parts.length, stamps: stamps.length, ripples: ripples.length, audio: !!ac, memEdge: memEdge, hand: !!hand,
+      drums: drums.map(function(d){ return { x: d.x, y: d.y, r: d.r }; }),
+      ring: { cx: ringG.cx, cy: ringG.cy, R: ringG.R }, W: W, H: H, DPR: DPR };
+  },
+  log: log,
+  counts: counts,
+  held: function(){ return drums.map(function(d){ return d.held; }).concat([Object.keys(pointers).length]); },
+  setSpeed: function(s){ speed = s; },
+  running: function(){ return running; }
+};
+})();
+</script>
+</body>
+</html>
