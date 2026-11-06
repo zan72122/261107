@@ -375,7 +375,9 @@ function components(){
   }
   for(const mk of S.marks)if(mk.lab<0)mk.rep=null;
   // 大模様（左右の広がりまで一続き）
-  if(S.unfolded){const big=comps.some(cp=>cp.mn<=Lo.c0-3&&cp.mx>=Lo.c1+2&&cp.marks.length>=2);
+  if(S.unfolded){let cl=0,cc=0,cr=0,tot=0;for(let i=0;i<N;i++){if(FT[i]<COLD){tot++;const x=i%GW;if(x<Lo.c0)cl++;else if(x>=Lo.c1)cr++;else cc++;}}
+    const fl=Lo.c0*GH;S.cover=+(tot/N).toFixed(3);
+    const big=comps.some(cp=>cp.mn<=Lo.c0-3&&cp.mx>=Lo.c1+2&&cp.marks.length>=2)||(cl>fl*0.06&&cr>fl*0.06&&cc>fl*0.06&&tot>N*0.22);
     if(big&&!S.bigActive){S.bigActive=true;SND.big();const m=Lo.mat;for(let i=0;i<5;i++)sparkle(m.x+m.w*(0.1+0.2*i),m.y+m.h*(0.3+0.4*rnd()),8,0.2,1.3);famExpr('p','joy',2.4);famExpr('c','joy',2.4);logE('big');}
     if(!big)S.bigActive=false;}
   S.maxMarks=maxMarks;
