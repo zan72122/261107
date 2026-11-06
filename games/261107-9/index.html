@@ -586,12 +586,12 @@ cv.addEventListener('pointermove',e=>{
   const list=e.getCoalescedEvents?e.getCoalescedEvents():null;
   if(list&&list.length>1){for(const ce of list)onMove(toV(ce));}else onMove(toV(e));
 },{passive:false});
-function endPtr(e,cancel){if(e.pointerId!==activeId)return;activeId=null;pointerDown=false;idleT=0;if(cancel)onCancel();else onUp(toV(e));}
+function endPtr(e,cancel){audioUnlock();if(e.pointerId!==activeId)return;activeId=null;pointerDown=false;idleT=0;if(cancel)onCancel();else onUp(toV(e));}
 cv.addEventListener('pointerup',e=>{e.preventDefault();endPtr(e,false);},{passive:false});
 cv.addEventListener('pointercancel',e=>endPtr(e,true));
 cv.addEventListener('lostpointercapture',e=>{if(e.pointerId===activeId)endPtr(e,true);});
 for(const n of ['touchstart','touchmove','touchend','gesturestart','gesturechange','dblclick','contextmenu','selectstart'])
-  document.addEventListener(n,e=>{if(e.cancelable)e.preventDefault();},{passive:false});
+  document.addEventListener(n,e=>{if(n==='touchend')audioUnlock();if(e.cancelable)e.preventDefault();},{passive:false});
 
 /* ================= 次の目標と実演 ================= */
 function getTarget(){
@@ -795,11 +795,14 @@ function drawPerson(p){
     arm(-30,shY,lh[0],lh[1],col,gw,-1);arm(30,shY,rh[0],rh[1],col,gw,1);hand(lh[0],lh[1],gw);hand(rh[0],rh[1],gw);
   }else{
     switch(p.role){
-    case 'trumpet':{const m=hp(4,22),a=-0.2+ht*0.6-an.inhale*0.28-an.hit*0.06;const c=Math.cos(a),s=Math.sin(a);
+    case 'trumpet':{const dir=tiltSide(p.hair)<0?-1:1,htm=ht*dir,cm=Math.cos(htm),sm=Math.sin(htm);
+      const m=[cm*4-sm*22,hy+sm*4+cm*22],a=-0.2+htm*0.6-an.inhale*0.28-an.hit*0.06;const c=Math.cos(a),s=Math.sin(a);
       rh=[m[0]+c*40-s*6,m[1]+s*40+c*6];lh=[m[0]+c*24-s*7,m[1]+s*24+c*7];
+      ctx.save();ctx.scale(dir,1);
       arm(30,shY,rh[0],rh[1]+4,col,gw,1);arm(-30,shY,lh[0],lh[1]+4,col,gw,-1);
       ctx.save();ctx.translate(m[0],m[1]);ctx.rotate(a);dspr(instr);ctx.restore();
-      hand(rh[0],rh[1],gw);hand(lh[0],lh[1],gw);break;}
+      hand(rh[0],rh[1],gw);hand(lh[0],lh[1],gw);ctx.restore();
+      if(dir<0){lh=[-rh[0],rh[1]];}break;}
     case 'drum':{ctx.save();ctx.translate(0,-36);dspr(instr);ctx.restore();
       lh=[-38,-42];const down=an.hit;rh=[26,-62-(1-down)*18];
       arm(-30,shY,lh[0],lh[1],col,gw,-1);arm(30,shY,rh[0],rh[1],col,gw,1);
