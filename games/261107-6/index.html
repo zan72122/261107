@@ -26,7 +26,11 @@ canvas{position:fixed;left:0;top:0;display:block;touch-action:none;-webkit-user-
 'use strict';
 /* ===================== 基本 ===================== */
 const cv=document.getElementById('c');
-const ctx=cv.getContext('2d',{alpha:false});
+const mainCtx=cv.getContext('2d',{alpha:false});
+let ctx=mainCtx;
+// 静止中の窓・羽根・背景はオフスクリーンに描いて使い回す（低負荷）
+const mk=()=>{const c=document.createElement('canvas');return {c,x:c.getContext('2d'),key:''};};
+const CW=mk(),CP=mk(),CB=mk();
 const PI=Math.PI, D=PI/180;
 const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
 const lerp=(a,b,t)=>a+(b-a)*t;
@@ -65,10 +69,11 @@ const BRIDGE={'0-1':{a:0,w:2.6,n:1},'1-0':{a:11.25,w:3.8,n:2},'0-2':{a:22.5,w:2.
 /* ===================== レイアウト ===================== */
 const L={W:1,H:1,dpr:1,s:1,ox:0,oy:0,C:{x:0,y:0},R0:50,R1:100,Rp:150,portrait:true};
 let bgGrad=null;
+let DPR_CAP=2,slowEma=1/60,slowN=0;
 const safeEl=document.getElementById('safe');
 function layout(){
   const W=Math.max(1,window.innerWidth|0), H=Math.max(1,window.innerHeight|0);
-  const dpr=Math.min(2,window.devicePixelRatio||1);
+  const dpr=Math.min(DPR_CAP,window.devicePixelRatio||1);
   L.W=W;L.H=H;L.dpr=dpr;
   cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);
   cv.style.width=W+'px';cv.style.height=H+'px';
@@ -95,8 +100,11 @@ function layout(){
     L.R1=Math.min(areaW*0.5,ih*0.5)*0.95;
     L.Rp=L.R1*1.52;
   }
-  bgGrad=ctx.createRadialGradient(L.C.x,L.C.y,10,L.C.x,L.C.y,Math.max(W,H)*0.8);
+  CB.c.width=cv.width;CB.c.height=cv.height;
+  bgGrad=CB.x.createRadialGradient(L.C.x,L.C.y,10,L.C.x,L.C.y,Math.max(W,H)*0.8);
   bgGrad.addColorStop(0,C.bg0);bgGrad.addColorStop(1,C.bg1);
+  CB.x.setTransform(dpr,0,0,dpr,0,0);CB.x.fillStyle=bgGrad;CB.x.fillRect(0,0,W,H);
+  CW.key='';CP.key='';
 }
 const toScreen=(x,y)=>({x:L.ox+x*L.s,y:L.oy+y*L.s});
 const toLocal=(x,y)=>({x:(x-L.ox)/L.s,y:(y-L.oy)/L.s});
@@ -164,7 +172,7 @@ const S={
   entries:[],arrivals:[],cycle:[],order:0,
   bloom:null,bloomQueue:null,expanded:false,expT0:0,
   shards:[],cradleT:-9,lastInput:0,demoDone:false,demo:null,
-  nR:3,winWig:-9,hopWig:-9,junWig:-9,lampFlash:-9
+  nR:3,winBusy:0,winWig:-9,hopWig:-9,junWig:-9,lampFlash:-9
 };
 
 /* ===================== 経路 ===================== */
@@ -190,7 +198,7 @@ function fire(){
   else S.queued=S.dir; // 次の一手だけ予約
 }
 function registerArrival(d){
-  S.arrivals.push({mat:d,t:S.T});S.order++;
+  S.arrivals.push({mat:d,t:S.T});S.order++;S.winBusy=S.T+3.6;
   const c=S.entries[0];let streak;
   if(c&&c.mat===d){
     c.count++;streak=c.count;
@@ -377,7 +385,7 @@ function update(dt){
   S.nR+=(clamp(E.length-1,3,5)-S.nR)*Math.min(1,dt*3);
   // 展開
   if(S.bloomQueue&&T>=S.bloomQueue.at){
-    const q=S.bloomQueue;S.bloomQueue=null;S.lampFlash=T;
+    const q=S.bloomQueue;S.bloomQueue=null;S.lampFlash=T;S.winBusy=Math.max(S.winBusy,T+1.7);
     if(!S.expanded){S.expanded=true;S.expT0=T;S.bloom={seq:q.seq,next:null,mode:'open',t0:T,p0:0,p:0};sBloom(true);}
     else{const b=S.bloom;b.next=q.seq;b.mode='fold';b.t0=T;b.p0=b.p;sBloom(false);}
   }
@@ -506,6 +514,19 @@ function drawWindow(R){
   ctx.fillStyle=C.win;ctx.beginPath();ctx.arc(0,0,R,0,PI*2);ctx.fill();
   ctx.save();ctx.beginPath();ctx.arc(0,0,R*0.995,0,PI*2);ctx.clip();
   ctx.rotate(T*0.03);
+  const key=R.toFixed(1)+'|'+dpr+'|'+S.arrivals.length+'|'+S.entries.length;
+  if(T<S.winBusy){windowContent(R);CW.key='';}
+  else{
+    if(CW.key!==key){const sz=Math.ceil(2*R*dpr)+2;CW.c.width=sz;CW.c.height=sz;
+      const sv=ctx;ctx=CW.x;ctx.setTransform(dpr,0,0,dpr,sz/2,sz/2);ctx.clearRect(-sz,-sz,sz*2,sz*2);
+      ctx.beginPath();ctx.arc(0,0,R*0.995,0,PI*2);ctx.clip();windowContent(R);ctx=sv;CW.key=key;}
+    const sz=CW.c.width/dpr;ctx.drawImage(CW.c,-sz/2,-sz/2,sz,sz);
+  }
+  ctx.restore();
+  windowFrame(R);
+}
+function windowContent(R){
+  const T=S.T;
   const E=S.entries;
   // 道しるべの細線（金属の細線）
   for(let k=0;k<1;k++)line(R*0.36,0,R*0.97,0,C.metal,0.16,0.8);
@@ -555,7 +576,8 @@ function drawWindow(R){
     // 空の中心：小さな目印
     T3(R*0.08,11.25,R*0.14,11.25,R*0.11,16,C.metal,0.25);flush(XF16);
   }
-  ctx.restore();
+}
+function windowFrame(R){
   // 窓の縁：金属の細線
   ctx.globalAlpha=1;ctx.strokeStyle=C.metal;ctx.lineWidth=1.6;ctx.beginPath();ctx.arc(0,0,R,0,PI*2);ctx.stroke();
   ctx.strokeStyle=C.gold;ctx.globalAlpha=0.6;ctx.lineWidth=1;ctx.beginPath();ctx.arc(0,0,R+5,0,PI*2);ctx.stroke();
@@ -568,6 +590,14 @@ function drawPetals(R){
   const b=S.bloom;if(!b||b.p<=0.01)return;
   const dpr=L.dpr;ctx.setTransform(dpr,0,0,dpr,L.C.x*dpr,L.C.y*dpr);
   ctx.rotate((1-Math.min(1,b.p))*0.5+S.T*0.01);
+  const stable=b.mode==='open'&&S.T-b.t0>1.8;
+  if(!stable){petalShapes(R,b);CP.key='';return;}
+  const key=R.toFixed(1)+'|'+L.Rp.toFixed(1)+'|'+dpr+'|'+b.seq.join('');
+  if(CP.key!==key){const sz=Math.ceil(2*L.Rp*1.02*dpr)+2;CP.c.width=sz;CP.c.height=sz;
+    const sv=ctx;ctx=CP.x;ctx.setTransform(dpr,0,0,dpr,sz/2,sz/2);ctx.clearRect(-sz,-sz,sz*2,sz*2);petalShapes(R,b);ctx=sv;CP.key=key;}
+  const sz=CP.c.width/dpr;ctx.drawImage(CP.c,-sz/2,-sz/2,sz,sz);
+}
+function petalShapes(R,b){
   const rb=R*0.86,rt=R+(L.Rp-R)*b.p,len=rt-rb,maxW=len*0.3;
   const wAt=x=>{const u=clamp((x-rb)/len,0,1);return maxW*(u<0.42?Math.sin(u/0.42*PI/2):Math.cos((u-0.42)/0.58*PI/2))+R*0.02*(1-u);};
   // 羽根の地
@@ -760,7 +790,7 @@ function drawDemo(){
 /* ===================== ループ ===================== */
 function render(){
   const dpr=L.dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.globalAlpha=1;
-  ctx.fillStyle=bgGrad||C.bg1;ctx.fillRect(0,0,L.W,L.H);
+  ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(CB.c,0,0);
   const R=curR();
   drawPetals(R);drawWindow(R);drawDeck();drawShards(R);drawDemo();
 }
@@ -769,6 +799,9 @@ function frame(ts){
   raf=0;if(document.hidden)return;
   let dt=last?(ts-last)/1000:1/60;last=ts;dt=clamp(dt,0,0.05);
   S.T+=dt;
+  // 重い端末では描画解像度を段階的に下げる（上げ戻さない）
+  if(dt>0&&dt<0.2){slowEma=slowEma*0.97+dt*0.03;slowN++;
+    if(slowN>120&&slowEma>1/45&&DPR_CAP>1&&(window.devicePixelRatio||1)>1){DPR_CAP=Math.max(1,DPR_CAP-0.5);slowN=0;slowEma=1/60;layout();}}
   try{update(dt);render();}catch(err){if(!frame.warned){frame.warned=1;console.warn(err);}}
   raf=requestAnimationFrame(frame);
 }
