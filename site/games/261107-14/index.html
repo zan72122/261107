@@ -1,0 +1,1480 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex,nofollow">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="format-detection" content="telephone=no">
+<title>ぺたっ、もぐっ！クレヨン食卓のひとやすみレコード</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#18214a;
+  touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;overscroll-behavior:none;position:fixed;inset:0}
+canvas{position:fixed;left:0;top:0;display:block;touch-action:none;-webkit-touch-callout:none}
+#safe{position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;
+  padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);
+  padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left)}
+</style>
+
+<script src="../../gf-playlog.js" defer></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="safe"></div>
+<script>
+'use strict';
+(function(){
+// =====================================================================
+//  ぺたっ、もぐっ！クレヨン食卓のひとやすみレコード
+//  sticker_place / crayon / no animals, no princess — single file, offline
+//  貼ると料理（音が足される）、はがすと食べる（音が抜ける）
+// =====================================================================
+var cv = document.getElementById('c');
+var ctx = cv.getContext('2d');
+var safeEl = document.getElementById('safe');
+var W = 0, H = 0, DPR = 1, L = {};
+var TAU = Math.PI * 2;
+function clamp(v, a, b){ return v < a ? a : v > b ? b : v; }
+function lerp(a, b, t){ return a + (b - a) * t; }
+function ease(t){ t = clamp(t, 0, 1); return t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+function easeOut(t){ t = clamp(t, 0, 1); return 1 - (1 - t) * (1 - t); }
+function dist(ax, ay, bx, by){ var dx = ax - bx, dy = ay - by; return Math.sqrt(dx * dx + dy * dy); }
+function angDiff(a, b){ var d = (a - b) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return Math.abs(d); }
+var seed = 1;
+function srnd(){ seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+function sr(a, b){ return a + (b - a) * srnd(); }
+function hashStr(s){ var h = 7; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 2147483000; return h + 1; }
+function rnd(a, b){ return a + Math.random() * (b - a); }
+
+var C = {
+  navy: '#18214a', ink: '#1d1631', white: '#fbf7ec', cream: '#efe3c4',
+  red: '#e5342c', red2: '#a91f22', straw: '#ee3a36', yellow: '#ffd23a', orange: '#ff8a1f',
+  green: '#4fb848', green2: '#2c7f33', brown: '#a1612c', brown2: '#64391b', pink: '#ff98b6', blue: '#8fc4f0'
+};
+var TOOLS = ['pan', 'board', 'whisk', 'kettle'];
+var TCOL = { pan: '#ff8a1f', board: '#ffd23a', whisk: '#6fd062', kettle: '#ff4a3a' };
+var NS = 8, SLOT_DUR = 1.0;
+var GANG = [-Math.PI / 2, Math.PI / 6, Math.PI * 5 / 6]; // guest seats: top, lower-right, lower-left
+var FINAL = { jam: 1, syrup: 1, salad: 1, cake: 1, crepe: 1 };
+var MAXP = 150;
+
+// =====================================================================
+//  State
+// =====================================================================
+function newPlate(){
+  return { food: null, amount: 1, x: L.cx || 0, y: L.cy || 0, placed: false, morph: 1, prev: null, fly: null,
+           done: false, wob: 0, order: '', ret: false, pop: 0, alpha: 1, glow: 0 };
+}
+function newGuest(i){
+  return { i: i, lx: 0, ly: 0, blink: 2 + i, blinkT: 0, mouth: 'smile', eatT: 0, happy: 0, cheer: 0, giggle: 0,
+           reach: null, lookAt: null, plate: null, cup: { fill: 0.35, tint: '#d99a4b', sip: 0 },
+           desire: null, favTool: null, pointT: 2 + i, hx: 0, hy: 0, bump: 0 };
+}
+var S = {
+  started: false, T: 0, phase: 'cook', turnT: 0, rot: 0, speed: 1, seatV: 0,
+  head: 0.55, lap: 0,
+  slots: [], tray: [], lastPlaced: 0,
+  cook: [], active: 0, center: null, returning: [], used: 0, emptied: 0,
+  guests: [], hold: null, run: null, lapSingles: [], pendingSwap: null,
+  parts: [], flyers: [], trails: [],
+  drag: null, ptr: null, idle: 0, demo: null, demoShown: false, invite: null, inviteT: 0,
+  combo: 0, lastTouchT: -9,
+  disc: { d1: 0, d2: 0, d2b: 0, d3: 0, d4: 0, d5: 0, d6: 0 }, ever: { pan: 0, board: 0, whisk: 0, kettle: 0 },
+  swapPB: false, swapRef: null, lastDish: null, peeledDine: 0,
+  party: false, partyT: 0, cycle: 0, pics: [], view: null, flash: 0, store: 'unknown',
+  mem: { made: [], orders: [], ate: [[], [], []] },
+  tableWob: 0, beat: 0, basket: 5, bowlPop: 0, basketPop: 0, startT: 0, startFx: 0, log: [], restNow: 0
+};
+for (var i = 0; i < NS; i++) S.slots.push({ tool: null, rest: false, sc: 1, vs: 0, hit: 0, skipLap: -1, wob: 0 });
+TOOLS.forEach(function(t){ S.tray.push({ tool: t, sc: 1, vs: 0, wob: 0 }); });
+for (i = 0; i < 3; i++) S.guests.push(newGuest(i));
+function logEv(ev, info){ S.log.push({ t: +S.T.toFixed(2), ev: ev, info: info || '' }); if (S.log.length > 400) S.log.shift(); }
+
+// =====================================================================
+//  Storage (端末内のみ)
+// =====================================================================
+var KEY = 'gf261107_14_table_v1';
+var FAMS = ['jam', 'cake', 'salad', 'top'];
+function validPic(p){ return typeof p === 'string' && p.indexOf('data:image/') === 0 && p.length < 400000; }
+function storeLoad(){
+  var raw = null;
+  try { raw = window.localStorage.getItem(KEY); } catch (e) { S.store = 'denied'; return; }
+  if (raw == null) { S.store = 'first'; return; }
+  try {
+    var d = JSON.parse(raw);
+    if (!d || d.v !== 1) throw new Error('bad');
+    var pics = Array.isArray(d.pics) ? d.pics.filter(validPic).slice(-4) : [];
+    var ate = [[], [], []];
+    if (Array.isArray(d.ate)) for (var g = 0; g < 3; g++) if (Array.isArray(d.ate[g])) ate[g] = d.ate[g].filter(function(k){ return FAMS.indexOf(k) >= 0; }).slice(-8);
+    S.mem.ate = ate;
+    S.cycle = (typeof d.cycle === 'number' && d.cycle >= 0 && d.cycle < 1e6) ? d.cycle | 0 : 0;
+    pics.forEach(addPic);
+    for (g = 0; g < 3; g++) if (ate[g].length) S.guests[g].desire = nextDesire(g);
+    S.store = 'restored';
+  } catch (e) {
+    S.store = 'corrupt';
+    try { window.localStorage.removeItem(KEY); } catch (e2) {}
+  }
+}
+function storeSave(){
+  var d = { v: 1, pics: S.pics.map(function(p){ return p.src; }), ate: S.mem.ate.map(function(a){ return a.slice(-8); }), cycle: S.cycle };
+  for (var k = 0; k < 5; k++) {
+    try { window.localStorage.setItem(KEY, JSON.stringify(d)); S.store = 'saved'; return true; }
+    catch (e) { if (d.pics.length) d.pics.shift(); else break; }
+  }
+  S.store = 'failed';
+  return false;
+}
+function addPic(src){
+  var im = new Image(); var p = { src: src, img: im, ok: false };
+  im.onload = function(){ p.ok = true; };
+  im.onerror = function(){ var j = S.pics.indexOf(p); if (j >= 0) S.pics.splice(j, 1); };
+  im.src = src; S.pics.push(p); if (S.pics.length > 4) S.pics.shift();
+}
+
+// =====================================================================
+//  Audio (Web Audio 合成)
+// =====================================================================
+var AC = null, MG = null, NB = null, HOLD = null;
+function audioInit(){
+  try {
+    if (!AC) {
+      var A = window.AudioContext || window.webkitAudioContext; if (!A) return;
+      AC = new A(); MG = AC.createGain(); MG.gain.value = 0.75;
+      var comp = AC.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 4;
+      MG.connect(comp); comp.connect(AC.destination);
+      var len = AC.sampleRate | 0; NB = AC.createBuffer(1, len, AC.sampleRate);
+      var d = NB.getChannelData(0); for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      var b = AC.createBuffer(1, 1, 22050), s = AC.createBufferSource(); s.buffer = b; s.connect(AC.destination); s.start(0);
+    }
+    if (AC.state === 'suspended' && !document.hidden) AC.resume();
+  } catch (e) {}
+}
+function aok(){ return AC && AC.state === 'running'; }
+function tone(f, dur, o){
+  if (!AC) return; o = o || {};
+  var t = AC.currentTime + (o.delay || 0);
+  var osc = AC.createOscillator(); osc.type = o.type || 'sine';
+  osc.frequency.setValueAtTime(f, t); if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t + dur);
+  var g = AC.createGain(); var v = o.vol || 0.2;
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v, t + (o.a || 0.006));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g); g.connect(MG); osc.start(t); osc.stop(t + dur + 0.05);
+}
+function noise(dur, o){
+  if (!AC || !NB) return; o = o || {};
+  var t = AC.currentTime + (o.delay || 0);
+  var s = AC.createBufferSource(); s.buffer = NB;
+  var f = AC.createBiquadFilter(); f.type = o.ft || 'bandpass'; f.frequency.setValueAtTime(o.f || 2000, t);
+  if (o.fto) f.frequency.exponentialRampToValueAtTime(o.fto, t + dur); f.Q.value = o.q || 1;
+  var g = AC.createGain(); var v = o.vol || 0.2;
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v, t + (o.a || 0.004));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(MG);
+  s.start(t, Math.random() * 0.5, dur + 0.05);
+}
+var PENTA = [523.3, 587.3, 659.3, 784, 880, 1046.5, 1174.7, 1318.5];
+var SFX = {
+  place: function(){ tone(190, 0.13, { type: 'triangle', to: 85, vol: 0.32 }); noise(0.05, { f: 2600, q: 1.5, vol: 0.16 }); },
+  peel: function(){ noise(0.24, { f: 700, fto: 4200, q: 2.5, vol: 0.22 }); tone(420, 0.16, { to: 980, vol: 0.06 }); },
+  press: function(){ tone(260, 0.06, { type: 'triangle', vol: 0.08 }); },
+  sizzle: function(lvl){ lvl = lvl || 1;
+    noise(0.55, { ft: 'highpass', f: 2600 + lvl * 600, q: 0.7, vol: 0.3, a: 0.003 });
+    noise(0.12, { f: 900 + lvl * 120, q: 1.2, vol: 0.12 });
+    for (var k = 0; k < 4 + lvl * 2; k++) noise(0.012, { f: 5000, q: 3, vol: 0.12, delay: 0.04 + Math.random() * 0.45 }); },
+  chop: function(n, fast){ var gap = fast ? 0.065 : 0.11;
+    for (var k = 0; k < n; k++) { var d = k * gap; tone(170, 0.07, { delay: d, vol: 0.24, to: 120 });
+      noise(0.03, { delay: d, f: 3200, q: 2, vol: 0.18 }); tone(1300 - k * 30, 0.03, { delay: d, type: 'square', vol: 0.025 }); } },
+  whisk: function(lvl){ for (var k = 0; k < 7; k++) noise(0.05, { delay: k * 0.06, f: (k % 2 ? 2400 : 1700) + lvl * 450, q: 3, vol: 0.13 });
+    tone(PENTA[1 + lvl], 0.35, { type: 'triangle', vol: 0.06, delay: 0.05 }); },
+  pour: function(fill){ for (var k = 0; k < 6; k++) tone(280 + k * 45 + fill * 260, 0.07, { delay: k * 0.06, vol: 0.09, to: 380 + k * 50 + fill * 260 });
+    noise(0.7, { ft: 'highpass', f: 4500, q: 0.5, vol: 0.05, a: 0.1 }); },
+  clink: function(){ tone(2600, 0.16, { vol: 0.06 }); tone(3460, 0.12, { vol: 0.04, delay: 0.035 }); },
+  munch: function(){ tone(230, 0.08, { type: 'triangle', to: 170, vol: 0.12 }); tone(210, 0.08, { type: 'triangle', to: 160, vol: 0.1, delay: 0.15 }); noise(0.05, { f: 600, vol: 0.05, delay: 0.02 }); },
+  sip: function(){ tone(500, 0.18, { to: 300, vol: 0.05 }); },
+  success: function(){ [0, 2, 4, 5].forEach(function(n, k){ tone(PENTA[n], 0.32, { type: 'triangle', vol: 0.15, delay: k * 0.085 }); });
+    tone(2093, 0.4, { vol: 0.04, delay: 0.34 }); },
+  tick: function(soft){ tone(soft ? 640 : 760, 0.04, { type: 'sine', vol: soft ? 0.02 : 0.035 }); },
+  dust: function(){ noise(0.05, { f: 1400 + Math.random() * 600, q: 0.8, vol: 0.035 }); },
+  boop: function(){ tone(440 + Math.random() * 60, 0.08, { vol: 0.045 }); },
+  whoosh: function(){ noise(1.6, { f: 300, fto: 1800, q: 0.8, vol: 0.12, a: 0.4 }); tone(330, 1.4, { type: 'triangle', to: 660, vol: 0.05, a: 0.3 }); },
+  fanfare: function(){ [0, 2, 4, 2, 4, 5, 7].forEach(function(n, k){ tone(PENTA[n], 0.3, { type: 'triangle', vol: 0.13, delay: k * 0.12 }); }); },
+  shutter: function(){ noise(0.08, { f: 3000, q: 1, vol: 0.2 }); tone(1500, 0.1, { vol: 0.06, delay: 0.08 }); },
+  happy: function(){ tone(660, 0.12, { to: 880, vol: 0.06 }); tone(880, 0.14, { to: 1100, vol: 0.05, delay: 0.12 }); },
+  nope: function(){ tone(330, 0.1, { type: 'triangle', vol: 0.06 }); tone(300, 0.1, { type: 'triangle', vol: 0.05, delay: 0.1 }); }
+};
+function holdStart(lvl){
+  if (!AC || !NB) return; holdStop();
+  try {
+    var t = AC.currentTime, s = AC.createBufferSource(); s.buffer = NB; s.loop = true;
+    var f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 2200 + lvl * 500; f.Q.value = 0.8;
+    var g = AC.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.09, t + 0.15);
+    var lfo = AC.createOscillator(); lfo.type = 'square'; lfo.frequency.value = 11; var lg = AC.createGain(); lg.gain.value = 0.03;
+    lfo.connect(lg); lg.connect(g.gain); s.connect(f); f.connect(g); g.connect(MG); s.start(t); lfo.start(t);
+    HOLD = { s: s, g: g, f: f, lfo: lfo };
+  } catch (e) { HOLD = null; }
+}
+function holdTune(lvl){ if (HOLD && AC) { try { HOLD.f.frequency.setTargetAtTime(2200 + lvl * 500, AC.currentTime, 0.1); } catch (e) {} } }
+function holdStop(){
+  if (!HOLD || !AC) { HOLD = null; return; }
+  try { var t = AC.currentTime; HOLD.g.gain.cancelScheduledValues(t); HOLD.g.gain.setTargetAtTime(0.0001, t, 0.05);
+    HOLD.s.stop(t + 0.3); HOLD.lfo.stop(t + 0.3); } catch (e) {}
+  HOLD = null;
+}
+
+// =====================================================================
+//  Crayon drawing helpers
+// =====================================================================
+var GRAIN = document.createElement('canvas');
+(function(){
+  GRAIN.width = GRAIN.height = 96; var g = GRAIN.getContext('2d'); seed = 99;
+  for (var i = 0; i < 520; i++) { g.fillStyle = 'rgba(0,0,0,' + sr(0.35, 1).toFixed(2) + ')';
+    g.beginPath(); g.ellipse(sr(0, 96), sr(0, 96), sr(0.4, 1.6), sr(0.3, 0.9), sr(0, 3), 0, TAU); g.fill(); }
+})();
+function bbox(pts){ var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; pts.forEach(function(p){ if (p[0] < x0) x0 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[0] > x1) x1 = p[0]; if (p[1] > y1) y1 = p[1]; }); return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }; }
+function wob(cx, cy, rx, ry, j, n, rot){
+  var pts = []; n = n || 22; j = j || 0;
+  for (var i = 0; i < n; i++) { var a = i / n * TAU, r = 1 + sr(-j, j), x = Math.cos(a) * rx * r, y = Math.sin(a) * ry * r;
+    if (rot) { var c = Math.cos(rot), s = Math.sin(rot), x2 = x * c - y * s; y = x * s + y * c; x = x2; }
+    pts.push([cx + x, cy + y]); }
+  return pts;
+}
+function rr(x, y, w, h, r){
+  var pts = [], cs = [[x + w - r, y + r, -Math.PI / 2], [x + w - r, y + h - r, 0], [x + r, y + h - r, Math.PI / 2], [x + r, y + r, Math.PI]];
+  for (var c = 0; c < 4; c++) for (var k = 0; k <= 3; k++) { var a = cs[c][2] + k / 3 * Math.PI / 2; pts.push([cs[c][0] + Math.cos(a) * r, cs[c][1] + Math.sin(a) * r]); }
+  return pts;
+}
+function rotP(pts, cx, cy, a){ var c = Math.cos(a), s = Math.sin(a); return pts.map(function(p){ var x = p[0] - cx, y = p[1] - cy; return [cx + x * c - y * s, cy + x * s + y * c]; }); }
+function jit(pts, j){ return pts.map(function(p){ return [p[0] + sr(-j, j), p[1] + sr(-j, j)]; }); }
+function sPath(g, pts, closed){
+  g.beginPath(); var n = pts.length, i, a, b;
+  if (closed) { a = pts[n - 1]; b = pts[0]; g.moveTo((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    for (i = 0; i < n; i++) { a = pts[i]; b = pts[(i + 1) % n]; g.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); } g.closePath(); }
+  else { g.moveTo(pts[0][0], pts[0][1]); for (i = 1; i < n - 1; i++) { a = pts[i]; b = pts[i + 1]; g.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); } g.lineTo(pts[n - 1][0], pts[n - 1][1]); }
+}
+// thick waxy fill: base + hatch strokes + shavings
+function cFill(g, pts, base, hatch, lw){
+  lw = lw || 3; g.save(); sPath(g, pts, true); g.fillStyle = base; g.fill(); g.clip();
+  var bb = bbox(pts), diag = bb.w + bb.h, n = Math.ceil(diag / (lw * 1.2)) + 3; g.lineCap = 'round';
+  for (var k = 0; hatch && k < hatch.length; k++) {
+    g.strokeStyle = hatch[k]; g.globalAlpha = 0.38; g.lineWidth = lw; var ang = -0.75 + k * 0.6 + sr(-0.15, 0.15);
+    var dx = Math.cos(ang), dy = Math.sin(ang); g.beginPath();
+    for (var i = 0; i < n; i++) { var px = bb.x + sr(0, bb.w), py = bb.y + sr(0, bb.h), len = sr(0.15, 0.45) * diag;
+      g.moveTo(px - dx * len, py - dy * len); g.lineTo(px + dx * len + sr(-lw, lw), py + dy * len + sr(-lw, lw)); }
+    g.stroke();
+  }
+  g.restore();
+}
+function flecks(g, pts, cols, count, s){
+  g.save(); sPath(g, pts, true); g.clip(); var bb = bbox(pts);
+  for (var i = 0; i < count; i++) { g.fillStyle = cols[i % cols.length]; g.globalAlpha = sr(0.55, 0.95);
+    g.beginPath(); g.ellipse(bb.x + sr(0, bb.w), bb.y + sr(0, bb.h), sr(0.8, 2.2) * s, sr(0.4, 0.9) * s, sr(0, 3), 0, TAU); g.fill(); }
+  g.restore();
+}
+function cLine(g, pts, col, w, closed, passes){
+  passes = passes || 3; g.save(); g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = col;
+  for (var p = 0; p < passes; p++) { g.globalAlpha = p === 0 ? 0.96 : 0.45; g.lineWidth = w * (p === 0 ? 1 : sr(0.5, 0.85)); sPath(g, jit(pts, w * 0.22), closed); g.stroke(); }
+  g.restore();
+}
+function shape(g, pts, base, hatch, outline, ow, lw){ cFill(g, pts, base, hatch, lw); if (outline) cLine(g, pts, outline, ow || 6, true, 3); }
+function grainOut(g, w, h, a){ g.save(); g.globalCompositeOperation = 'destination-out'; g.globalAlpha = a; g.fillStyle = g.createPattern(GRAIN, 'repeat'); g.fillRect(0, 0, w, h); g.restore(); }
+function dot(g, x, y, r, col, a){ g.globalAlpha = a == null ? 1 : a; g.fillStyle = col; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill(); g.globalAlpha = 1; }
+
+// ---------- sprite cache ----------
+var SPR = {};
+function spr(key, w, h, fn){
+  var s = SPR[key]; if (s) return s;
+  var c = document.createElement('canvas'); c.width = Math.max(2, Math.ceil(w * DPR)); c.height = Math.max(2, Math.ceil(h * DPR));
+  var g = c.getContext('2d'); g.scale(DPR, DPR); seed = hashStr(key);
+  g.save(); g.scale(w / 100, h / 100); fn(g); g.restore(); grainOut(g, w, h, 0.22);
+  s = { c: c, w: w, h: h }; SPR[key] = s; return s;
+}
+function dspr(s, x, y, sc, rot, a, sx, sy){
+  if (!s) return; ctx.save(); ctx.translate(x, y); if (rot) ctx.rotate(rot);
+  var kx = (sc == null ? 1 : sc) * (sx || 1), ky = (sc == null ? 1 : sc) * (sy || 1);
+  if (kx !== 1 || ky !== 1) ctx.scale(kx, ky); if (a != null) ctx.globalAlpha = a;
+  ctx.drawImage(s.c, -s.w / 2, -s.h / 2, s.w, s.h); ctx.restore();
+}
+
+// ---------- painters (100x100 units) ----------
+var OW = 6.5, INK = C.ink;
+function heart(x, y, s, rot){ var pts = []; for (var i = 0; i < 22; i++) { var t = i / 22 * TAU, hx = 16 * Math.pow(Math.sin(t), 3),
+  hy = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t); pts.push([x + hx / 17 * s, y - hy / 17 * s - s * 0.1]); }
+  return rot ? rotP(pts, x, y, rot) : pts; }
+function berry(g, x, y, s, rot, body, dark, glaze, ow){
+  var pts = heart(x, y, s, rot); shape(g, pts, body, [dark, '#ff6a5a'], INK, ow || OW * 0.8, s * 0.22);
+  if (glaze) flecks(g, pts, glaze, 10, s * 0.12);
+  g.fillStyle = '#ffe58a'; for (var i = 0; i < 6; i++) { var a = rot + sr(-1.2, 1.2), r = sr(0.1, 0.65) * s;
+    var px = x + Math.sin(a) * r * 0.8, py = y + Math.cos(rot) * r * 0.6 + sr(-0.2, 0.3) * s; g.beginPath(); g.ellipse(px, py, s * 0.07, s * 0.11, a, 0, TAU); g.fill(); }
+  var lx = x + Math.sin(rot) * s * 0.75, ly = y - Math.cos(rot) * s * 0.75;
+  for (var k = 0; k < 5; k++) { var a2 = rot - Math.PI / 2 + (k - 2) * 0.55; var lp = wob(lx + Math.cos(a2) * s * 0.28, ly + Math.sin(a2) * s * 0.28 - s * 0.05, s * 0.26, s * 0.12, 0.1, 10, a2);
+    shape(g, lp, C.green, [C.green2], INK, ow ? ow * 0.6 : OW * 0.5, s * 0.1); }
+}
+function plateArt(g){ var p = wob(50, 52, 47, 43, 0.02, 26); shape(g, p, C.white, ['#e8e0cc', '#ffffff'], INK, 5, 4);
+  cLine(g, wob(50, 52, 37, 33, 0.03, 22), '#8fc4f0', 3.5, true, 2); cLine(g, wob(50, 52, 42, 38, 0.02, 24), '#ffb05a', 2, true, 1); }
+function stickerBase(g){ var p = wob(50, 50, 47, 47, 0.035, 24); shape(g, p, '#fffdf4', ['#efe6cf', '#ffffff'], '#c7bfa9', 3, 4); }
+var ICON = {
+  pan: function(g){
+    var hd = rotP(rr(60, 44, 40, 13, 6), 60, 50, -0.38); shape(g, hd, '#b5672e', ['#7a3d17', '#e08a45'], INK, OW, 3);
+    var b = wob(40, 56, 30, 28, 0.03, 22); shape(g, b, '#3a3550', ['#211d33', '#5a5578'], INK, OW, 3);
+    var inr = wob(40, 56, 21, 19, 0.04, 18); cFill(g, inr, '#4b4566', ['#615b80']);
+    cLine(g, [[24, 46], [30, 38], [40, 35]], '#ffffff', 3.5, false, 2);
+    for (var i = 0; i < 6; i++) dot(g, 36 + sr(-10, 12), 58 + sr(-8, 9), sr(1.5, 3), i % 2 ? C.yellow : C.orange, 0.9);
+  },
+  board: function(g){
+    var bd = rotP(rr(12, 30, 76, 50, 9), 50, 55, -0.08); shape(g, bd, '#f0ae5c', ['#c8782c', '#ffd27a'], INK, OW, 3.5);
+    dot(g, 78, 40, 4.5, C.navy); cLine(g, wob(78, 40, 4.5, 4.5, 0, 10), INK, 2.5, true, 1);
+    for (var i = 0; i < 4; i++) cLine(g, [[18, 44 + i * 9], [55, 42 + i * 9.5], [70, 45 + i * 9]], '#c8782c', 1.8, false, 1);
+    var bl = rotP([[20, 66], [58, 34], [66, 30], [64, 40], [28, 72]], 44, 50, 0); shape(g, bl, '#e6eef7', ['#b9c8d8', '#ffffff'], INK, OW * 0.8, 2.5);
+    var hn = rotP(rr(60, 16, 26, 11, 5), 70, 22, -0.72); shape(g, hn, C.red, [C.red2, '#ff7a5a'], INK, OW * 0.8, 3);
+    for (var k = 0; k < 4; k++) dot(g, 36 + k * 8, 58 - k * 6, 3, C.straw, 0.9);
+  },
+  whisk: function(g){
+    var hd = rr(43, 62, 14, 32, 6); shape(g, hd, C.green, [C.green2, '#9ff08a'], INK, OW, 3);
+    [[26, 46], [17, 47], [7, 48]].forEach(function(q){ var p = wob(50, 36, q[0] / 2, 28, 0.03, 18); g.save(); cLine(g, p, INK, OW + 1, true, 1); cLine(g, p, '#d9e2ee', 4, true, 2); g.restore(); });
+    dot(g, 50, 9, 6, '#fff2c8', 0.95); dot(g, 60, 20, 4, '#fff2c8', 0.9);
+  },
+  kettle: function(g){
+    var sp = [[26, 62], [8, 40], [4, 34], [12, 36], [32, 52]]; shape(g, sp, C.red, [C.red2], INK, OW * 0.8, 3);
+    var body = wob(52, 64, 32, 26, 0.03, 22); shape(g, body, '#ff4a3a', [C.red2, '#ff8a6a'], INK, OW, 3.5);
+    cLine(g, [[28, 44], [36, 18], [66, 16], [76, 42]], INK, OW + 3, false, 1); cLine(g, [[28, 44], [36, 18], [66, 16], [76, 42]], C.yellow, 5, false, 2);
+    var lid = wob(52, 40, 20, 6, 0.05, 14); shape(g, lid, '#ffd23a', [C.orange], INK, OW * 0.7, 2);
+    dot(g, 52, 33, 5, C.orange); cLine(g, [[38, 60], [42, 54], [50, 52]], '#ffffff', 3.5, false, 2);
+    for (var i = 0; i < 3; i++) cLine(g, [[6 + i * 4, 28], [2 + i * 5, 18], [8 + i * 4, 8]], '#ffffff', 2.5, false, 1);
+  }
+};
+function toolSpr(tool, D){ return spr('t_' + tool + '_' + Math.round(D), D, D, function(g){ stickerBase(g); g.save(); g.translate(14, 14); g.scale(0.72, 0.72); ICON[tool](g); g.restore(); }); }
+function restSpr(D){ return spr('rest_' + Math.round(D), D, D, function(g){
+  var p = wob(50, 50, 40, 40, 0.06, 20); g.save(); g.setLineDash([7, 6]); cLine(g, p, '#a9b7d6', 4, true, 2); g.restore();
+  cFill(g, wob(50, 50, 30, 30, 0.08, 18), 'rgba(170,190,225,0.18)', ['rgba(150,170,215,0.4)']);
+  // fork & spoon
+  cLine(g, [[36, 30], [40, 52], [42, 72]], '#7e8db5', 4.5, false, 2); for (var i = -1; i <= 1; i++) cLine(g, [[34 + i * 4, 24], [37 + i * 2, 36]], '#7e8db5', 2.5, false, 1);
+  cLine(g, [[62, 42], [60, 72]], '#7e8db5', 4.5, false, 2); shape(g, wob(63, 34, 7, 10, 0.05, 12), 'rgba(126,141,181,0.7)', null, '#7e8db5', 3);
+}); }
+function blankSpr(D){ return spr('blank_' + Math.round(D), D, D, function(g){ g.save(); g.setLineDash([3, 9]); cLine(g, wob(50, 50, 34, 34, 0.04, 20), 'rgba(205,195,170,0.85)', 3, true, 1); g.restore(); }); }
+function plateSpr(D){ return spr('plate_' + Math.round(D), D, D, plateArt); }
+
+// ---------- food painters ----------
+var DONE = ['#f7dc8f', '#f0bd60', '#d9913d', '#b8692a', '#a35a24'];
+function paintFood(g, f){
+  var i, k;
+  switch (f.k) {
+    case 'raw': berry(g, 50, 50, 30, 0, C.straw, C.red2); break;
+    case 'chop':
+      var np = f.lvl * 3 + 1;
+      for (i = 0; i < np; i++) { var a = i / np * TAU + sr(-0.3, 0.3), r = (f.lvl === 1 ? 12 : 20) * sr(0.3, 1), cx = 50 + Math.cos(a) * r, cy = 52 + Math.sin(a) * r * 0.8;
+        var sz = 11 - f.lvl * 1.5, rot = sr(0, TAU), w = [[cx - sz, cy], [cx + sz, cy]]; var pts = [];
+        for (k = 0; k <= 8; k++) { var t = Math.PI * k / 8; pts.push([cx - Math.cos(t) * sz, cy + Math.sin(t) * sz * 0.9]); }
+        pts = rotP(pts, cx, cy, rot); shape(g, pts, C.straw, [C.red2, '#ff7060'], INK, 3.2, 2.5);
+        var core = rotP(wob(cx, cy + sz * 0.3, sz * 0.5, sz * 0.25, 0.1, 10), cx, cy, rot); cFill(g, core, '#ffd0d0', ['#ff9a9a']); }
+      flecks(g, wob(50, 52, 34, 28, 0, 16), [C.red, '#ffb3b3', C.yellow], 14, 1.2);
+      break;
+    case 'grill':
+      var bc = ['#d23a2e', '#b5352a', '#8f3420'][f.lvl - 1], dk = ['#8a1f1a', '#6e2316', '#4f2010'][f.lvl - 1];
+      [[36, 50, -0.5], [62, 46, 0.4], [50, 66, 0.1]].forEach(function(q){ berry(g, q[0], q[1], 17, q[2], bc, dk, [C.orange, '#ffb04a', '#7a3a10'], 3.2);
+        for (var s2 = 0; s2 < 2 + f.lvl; s2++) cLine(g, [[q[0] - 9, q[1] - 6 + s2 * 6], [q[0] + 9, q[1] - 10 + s2 * 6]], '#4a2410', 2.2, false, 1); });
+      flecks(g, wob(50, 55, 40, 32, 0, 16), ['#ffb04a', '#ffe08a'], 6 + f.lvl * 6, 1.3);
+      break;
+    case 'jam':
+      var rj = f.lvl === 2 ? 34 : 28, pj = wob(50, 54, rj, rj * 0.82, 0.12, 20);
+      shape(g, pj, '#c4142a', ['#8a0c1c', '#ff3a50', '#e0203a'], INK, 4.5, 3);
+      flecks(g, pj, ['#ff6a7a', '#5a0610', '#ffd0d8'], 26, 1.4);
+      cLine(g, [[50 - rj * 0.55, 46], [50 - rj * 0.3, 38], [50, 36]], '#ffffff', 4, false, 2); dot(g, 50 + rj * 0.35, 44, 3, '#ffffff', 0.9);
+      break;
+    case 'syrup':
+      var ps = wob(50, 56, 42, 30, 0.14, 24); shape(g, ps, '#e42a46', ['#ff5a70', '#b0142a'], INK, 3.5, 3);
+      for (i = 0; i < 4; i++) cLine(g, [[20 + i * 16, 48 + sr(-4, 4)], [30 + i * 14, 56], [26 + i * 15, 66]], '#ff9aaa', 2.5, false, 1);
+      cLine(g, [[24, 46], [40, 38], [58, 38]], '#ffffff', 3.5, false, 2);
+      break;
+    case 'salad':
+      for (i = 0; i < 9; i++) { var a3 = sr(0, TAU), r3 = sr(0, 24), x3 = 50 + Math.cos(a3) * r3, y3 = 54 + Math.sin(a3) * r3 * 0.8, s3 = sr(7, 10);
+        var pp = rotP(wob(x3, y3, s3, s3 * 0.7, 0.2, 9), x3, y3, sr(0, 3)); shape(g, pp, ['#a8302a', '#8f3420', '#c4402e'][i % 3], ['#5a1a10', '#ff9a3a'], INK, 3, 2); }
+      for (i = 0; i < 4; i++) { var a4 = sr(0, TAU), lp = wob(50 + Math.cos(a4) * 18, 50 + Math.sin(a4) * 14, 7, 3.5, 0.1, 10, a4); shape(g, lp, C.green, [C.green2], INK, 2.5, 1.5); }
+      flecks(g, wob(50, 54, 36, 30, 0, 16), ['#ffb04a', '#ffe08a', '#ffffff'], 18, 1.2);
+      break;
+    case 'batter':
+      var base = f.berry ? '#f7a9c0' : '#f7e3a4', rb = f.thin ? 40 : 28 + f.lvl * 2, pb = wob(50, 55, rb, rb * (f.thin ? 0.62 : 0.8), f.thin ? 0.05 : 0.1, 20);
+      shape(g, pb, base, [f.berry ? '#ff7a9a' : '#e8c47a', '#ffffff'], INK, 4, 3);
+      var sp = []; for (i = 0; i < 26; i++) { var t2 = i / 26 * TAU * (1 + f.lvl * 0.5); sp.push([50 + Math.cos(t2) * (3 + i * rb / 34), 55 + Math.sin(t2) * (3 + i * rb / 34) * 0.7]); }
+      cLine(g, sp, f.berry ? '#e05a80' : '#d9a64a', 2.2, false, 1);
+      for (i = 0; i < f.lvl * 3; i++) dot(g, 50 + sr(-rb * 0.6, rb * 0.6), 55 + sr(-rb * 0.4, rb * 0.4), sr(1.5, 3.2), '#ffffff', 0.85);
+      if (f.berry) flecks(g, pb, [C.straw, '#c41a30'], 12, 1.5);
+      if (f.thin) cLine(g, [[22, 50], [40, 44], [60, 44]], '#ffffff', 3, false, 1);
+      break;
+    case 'cake':
+      var m = f.m || 1, col = DONE[f.lvl], dk2 = DONE[Math.min(4, f.lvl + 1)];
+      if (f.berry) col = ['#f4b8b0', '#eaa08a', '#d9845e', '#c06a40', '#a85a34'][f.lvl];
+      var hh = 9, y0 = 64;
+      for (k = 0; k < m; k++) { var yy = y0 - k * hh; var side = wob(50, yy + 3, 36, 13, 0.03, 20); shape(g, side, dk2, [DONE[Math.min(4, f.lvl + 1)]], INK, 4, 2.5);
+        var top = wob(50, yy - 2, 36, 12, 0.03, 20); shape(g, top, col, [dk2, '#fff0b0'], INK, 3.5, 2.5); flecks(g, top, [dk2, '#fff2c0'], 10, 1.2);
+        if (f.berry) flecks(g, top, [C.straw], 6, 1.6); }
+      var ty = y0 - (m - 1) * hh - 2;
+      if (!f.top) { var bt = rotP(rr(44, ty - 7, 12, 8, 2), 50, ty - 3, 0.2); shape(g, bt, '#ffe46a', ['#ffc83a'], INK, 2.5, 1.5); }
+      else topping(g, f.top, 50, ty);
+      break;
+    case 'crepe':
+      var cc = f.berry ? '#f2b8a8' : DONE[Math.max(0, f.lvl - 1)];
+      var tri = [[16, 66], [84, 66], [62, 30], [36, 28]]; shape(g, tri, cc, [DONE[Math.min(4, f.lvl)], '#fff3c8'], INK, 4, 2.5);
+      for (i = 0; i < 6 + f.lvl * 3; i++) dot(g, sr(30, 70), sr(36, 62), sr(1.2, 2.6), DONE[Math.min(4, f.lvl + 1)], 0.8);
+      cLine(g, [[22, 64], [50, 50], [78, 64]], DONE[4], 2.5, false, 1);
+      if (f.top) topping(g, f.top, 50, 40);
+      break;
+  }
+}
+function topping(g, t, x, y){
+  if (t === 'jam') { var p = wob(x, y, 15, 9, 0.15, 14); shape(g, p, '#c4142a', ['#ff3a50', '#8a0c1c'], INK, 3, 2);
+    cLine(g, [[x - 13, y + 3], [x - 15, y + 13]], '#c4142a', 5, false, 1); cLine(g, [[x + 11, y + 4], [x + 12, y + 16]], '#c4142a', 5, false, 1); dot(g, x - 4, y - 3, 2.5, '#ffffff'); }
+  else { var p2 = wob(x, y + 1, 26, 9, 0.12, 16); shape(g, p2, '#e42a46', ['#ff5a70'], INK, 2.5, 2);
+    for (var i = 0; i < 4; i++) cLine(g, [[x - 22 + i * 14, y + 4], [x - 22 + i * 14, y + 14 + (i % 2) * 8]], '#e42a46', 4.5, false, 1); dot(g, x - 8, y - 2, 2.5, '#ffffff'); }
+}
+function foodKey(f){
+  if (!f) return null;
+  switch (f.k) {
+    case 'chop': case 'grill': case 'jam': return f.k + f.lvl;
+    case 'batter': return 'b' + f.lvl + (f.berry ? 'p' : '') + (f.thin ? 't' : '');
+    case 'cake': return 'c' + f.lvl + '_' + f.m + (f.berry ? 'p' : '') + (f.top || '');
+    case 'crepe': return 'cr' + f.lvl + (f.berry ? 'p' : '') + (f.top || '');
+    default: return f.k;
+  }
+}
+function foodSpr(f, D){ var k = foodKey(f); if (!k) return null; return spr('f_' + k + '_' + Math.round(D), D, D, function(g){ paintFood(g, f); }); }
+function fam(f){ if (!f) return null; if (f.k === 'jam' || f.k === 'syrup') return 'jam'; if ((f.k === 'cake' || f.k === 'crepe') && f.top) return 'top';
+  if (f.k === 'cake' || f.k === 'crepe') return 'cake'; if (f.k === 'salad') return 'salad'; return null; }
+var FAM_FOOD = { jam: { k: 'jam', lvl: 2 }, cake: { k: 'cake', lvl: 2, m: 2 }, salad: { k: 'salad' }, top: { k: 'cake', lvl: 2, m: 2, top: 'jam' } };
+var FAM_TOOL = { jam: 'board', cake: 'whisk', salad: 'pan', top: 'board' };
+
+// ---------- guests ----------
+var GST = [
+  { skin: '#f4c39d', hair: '#ff7a1f', shirt: '#4fb848', shirt2: '#2c7f33', cheek: '#ff8f8f' },
+  { skin: '#e8b58c', hair: '#d8d4cc', shirt: '#e5342c', shirt2: '#a91f22', cheek: '#ff9a8a' },
+  { skin: '#c98c5e', hair: '#3a2418', shirt: '#ffb52a', shirt2: '#e08a10', cheek: '#ff8070' }
+];
+function headSpr(i, D){ return spr('h' + i + '_' + Math.round(D), D, D, function(g){
+  var st = GST[i];
+  if (i === 0) { for (var k = 0; k < 9; k++) { var a = Math.PI + k / 8 * Math.PI; shape(g, wob(50 + Math.cos(a) * 34, 50 + Math.sin(a) * 32, 14, 14, 0.15, 12), st.hair, ['#ffb03a', '#d85a10'], INK, 4, 2); }
+    shape(g, wob(50, 12, 13, 11, 0.1, 12), st.hair, ['#ffb03a'], INK, 4, 2); }
+  if (i === 2) { shape(g, wob(50, 42, 38, 34, 0.06, 20), st.hair, ['#5a3a28', '#1a100a'], INK, 4, 2.5); }
+  var face = wob(50, 54, 33, 32, 0.03, 22); shape(g, face, st.skin, ['#ffffff', '#d99a72'], INK, 5, 3);
+  if (i === 1) { shape(g, wob(20, 46, 9, 13, 0.15, 12), st.hair, ['#ffffff', '#a8a49c'], INK, 3.5, 2); shape(g, wob(80, 46, 9, 13, 0.15, 12), st.hair, ['#ffffff', '#a8a49c'], INK, 3.5, 2);
+    shape(g, wob(50, 23, 10, 5, 0.2, 10), st.hair, ['#ffffff'], INK, 3, 2); }
+  if (i === 2) { shape(g, wob(50, 30, 34, 12, 0.05, 18), st.hair, ['#5a3a28'], INK, 4, 2.5); cLine(g, [[18, 36], [50, 28], [82, 36]], C.yellow, 7, false, 2); }
+  if (i === 0) { cLine(g, [[22, 34], [36, 28], [50, 32], [64, 27], [78, 34]], st.hair, 9, false, 2); }
+  dot(g, 26, 66, 7, st.cheek, 0.7); dot(g, 74, 66, 7, st.cheek, 0.7);
+}); }
+function torsoSpr(i, D){ return spr('to' + i + '_' + Math.round(D), D, D, function(g){
+  var st = GST[i], p = [[12, 96], [16, 40], [34, 18], [66, 18], [84, 40], [88, 96]]; shape(g, p, st.shirt, [st.shirt2, '#ffffff'], INK, 6, 4);
+  if (i === 1) for (var k = 0; k < 3; k++) cLine(g, [[22, 50 + k * 14], [78, 50 + k * 14]], C.yellow, 4, false, 1);
+  if (i === 0) shape(g, wob(50, 22, 14, 8, 0.1, 10), '#ffffff', null, INK, 3);
+  if (i === 2) for (var j = 0; j < 5; j++) dot(g, sr(25, 75), sr(40, 85), 4, C.red, 0.9);
+}); }
+function basketSpr(D){ return spr('bask_' + Math.round(D), D, D, function(g){
+  var p = [[8, 46], [92, 46], [82, 90], [18, 90]]; shape(g, p, '#c9813c', ['#8a5220', '#f0b060'], INK, 6, 3);
+  for (var k = 0; k < 4; k++) cLine(g, [[12 + k * 2, 56 + k * 9], [88 - k * 2, 56 + k * 9]], '#7a4618', 3, false, 1);
+  for (k = 0; k < 6; k++) cLine(g, [[18 + k * 13, 48], [22 + k * 11.5, 88]], '#7a4618', 2.5, false, 1);
+  cLine(g, [[14, 48], [30, 6], [70, 6], [86, 48]], INK, 9, false, 1); cLine(g, [[14, 48], [30, 6], [70, 6], [86, 48]], '#e09a50', 5, false, 2);
+}); }
+function bowlSpr(D){ return spr('bowl_' + Math.round(D), D, D, function(g){
+  shape(g, wob(50, 46, 42, 13, 0.04, 20), '#f7e3a4', ['#e8c47a', '#ffffff'], INK, 5, 3);
+  var b = [[8, 46], [92, 46], [80, 80], [62, 90], [38, 90], [20, 80]]; shape(g, b, '#4f9de0', ['#2a6ab0', '#9fd0ff'], INK, 6, 3);
+  for (var k = 0; k < 5; k++) dot(g, 22 + k * 14, 66 + (k % 2) * 6, 4, '#ffffff', 0.9);
+  var sp = []; for (var i = 0; i < 18; i++) { var t = i / 18 * TAU * 1.4; sp.push([50 + Math.cos(t) * (2 + i * 1.6), 46 + Math.sin(t) * (1 + i * 0.5)]); } cLine(g, sp, '#d9a64a', 2, false, 1);
+}); }
+function frameSpr(D){ return spr('frame_' + Math.round(D), D, D, function(g){
+  var o = rr(4, 8, 92, 84, 6); shape(g, o, '#ffb52a', ['#e07a10', '#ffe08a'], INK, 6, 4);
+  var inn = rr(18, 22, 64, 56, 3); shape(g, inn, '#fbf7ec', ['#efe3c4'], INK, 3.5, 3);
+  dot(g, 36, 44, 6, C.red); shape(g, [[24, 72], [44, 50], [56, 62], [66, 52], [78, 72]], C.green, [C.green2], INK, 2.5, 2);
+  for (var k = 0; k < 6; k++) dot(g, 10 + sr(0, 80), 12 + sr(0, 76), 2.5, k % 2 ? C.red : '#ffffff', 0.9);
+}); }
+function handSpr(D){ return spr('hand_' + Math.round(D), D, D, function(g){
+  var fing = rr(40, 4, 18, 46, 9); shape(g, fing, '#ffd9b8', ['#f0b890'], INK, 5, 3);
+  var palm = wob(52, 66, 26, 24, 0.06, 18); shape(g, palm, '#ffd9b8', ['#f0b890', '#ffffff'], INK, 6, 3);
+  shape(g, rotP(rr(18, 54, 22, 12, 6), 30, 60, -0.6), '#ffd9b8', ['#f0b890'], INK, 4, 2);
+  cLine(g, [[44, 14], [52, 12]], '#ffffff', 3, false, 1);
+}); }
+function cupSpr(D){ return spr('cup_' + Math.round(D), D, D, function(g){
+  cLine(g, wob(80, 54, 12, 14, 0.05, 12), INK, 10, true, 1); cLine(g, wob(80, 54, 12, 14, 0.05, 12), '#ffffff', 5, true, 2);
+  var b = [[14, 26], [74, 26], [68, 88], [20, 88]]; shape(g, b, '#fffdf4', ['#e8dcc0'], INK, 6, 3);
+  cLine(g, [[18, 66], [70, 66]], C.red, 6, false, 2);
+}); }
+
+// =====================================================================
+//  Background & table (cached per resize)
+// =====================================================================
+var BG = null, TABLE = null;
+function buildBG(){
+  BG = document.createElement('canvas'); BG.width = cv.width; BG.height = cv.height;
+  var g = BG.getContext('2d'); g.scale(DPR, DPR); seed = 4242;
+  g.fillStyle = C.navy; g.fillRect(0, 0, W, H); g.lineCap = 'round';
+  var cols = ['#22306a', '#121a3c', '#2a3a78', '#1c2756'];
+  for (var i = 0; i < 260; i++) { g.strokeStyle = cols[i % 4]; g.globalAlpha = sr(0.3, 0.7); g.lineWidth = sr(4, 14);
+    var x = sr(-40, W + 40), y = sr(-40, H + 40), a = sr(-0.8, -0.4), l = sr(40, 200); g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a) * l * 0.5 + sr(-20, 20), y + Math.sin(a) * l * 0.5, x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); }
+  var acc = [C.red, C.yellow, C.orange, C.green];
+  for (i = 0; i < 46; i++) { g.strokeStyle = acc[i % 4]; g.globalAlpha = sr(0.12, 0.32); g.lineWidth = sr(3, 8);
+    var ex = srnd() < 0.5 ? sr(0, W * 0.18) : sr(W * 0.82, W), ey = sr(0, H); if (srnd() < 0.4) { ex = sr(0, W); ey = srnd() < 0.5 ? sr(0, H * 0.1) : sr(H * 0.9, H); }
+    g.beginPath(); g.moveTo(ex, ey); g.lineTo(ex + sr(-30, 30), ey + sr(-30, 30)); g.stroke(); }
+  for (i = 0; i < 40; i++) dot(g, sr(0, W), sr(0, H), sr(1, 3), acc[i % 4], 0.35);
+  g.globalAlpha = 1;
+  // tray sheet
+  var sh = L.sheet; g.save(); seed = 77; var sp = rr(sh.x, sh.y, sh.w, sh.h, 14); shape(g, sp, '#f5ecd4', ['#e6d8b4', '#fffaf0'], '#c9b98f', 4, 5);
+  g.setLineDash([6, 8]); cLine(g, rr(sh.x + 8, sh.y + 8, sh.w - 16, sh.h - 16, 10), 'rgba(200,180,140,0.8)', 2, true, 1); g.restore();
+  // counter under ingredients
+  var cn = L.counter; seed = 91; shape(g, wob(cn.x, cn.y, cn.rx, cn.ry, 0.04, 24), '#2e3b7a', ['#3c4c92', '#22306a'], '#4a5ca8', 4, 6);
+  grainOut(g, W, H, 0.12);
+}
+function buildTable(){
+  var R = L.R, D = R * 2 + 24; TABLE = document.createElement('canvas'); TABLE.width = Math.ceil(D * DPR); TABLE.height = Math.ceil(D * DPR);
+  var g = TABLE.getContext('2d'); g.scale(DPR, DPR); seed = 555; var c = D / 2;
+  var outer = wob(c, c, R + 6, R + 6, 0.008, 48); shape(g, outer, '#ff8a1f', [C.red, C.yellow], INK, 9, 6);
+  var top = wob(c, c, R - 6, R - 6, 0.008, 48); shape(g, top, C.white, ['#efe6cf', '#ffffff', '#f3ead6'], C.red, 6, 6);
+  g.save(); g.lineWidth = R * 0.34; g.strokeStyle = 'rgba(255,190,120,0.16)'; g.beginPath(); g.arc(c, c, R * 0.795, 0, TAU); g.stroke();
+  g.lineWidth = R * 0.26; g.strokeStyle = 'rgba(255,255,255,0.55)'; g.beginPath(); g.arc(c, c, R * 0.795, 0, TAU); g.stroke(); g.restore();
+  cLine(g, wob(c, c, R * 0.585, R * 0.585, 0.01, 36), 'rgba(255,190,80,0.7)', 3, true, 2);
+  cLine(g, wob(c, c, R * 0.99, R * 0.99, 0.006, 40), 'rgba(255,150,60,0.6)', 3, true, 1);
+  for (var i = 0; i < 18; i++) { var a = sr(0, TAU), r = sr(0.2, 0.5) * R; dot(g, c + Math.cos(a) * r, c + Math.sin(a) * r, sr(1, 2.5), [C.yellow, C.orange, '#ffc0b0'][i % 3], 0.5); }
+  // start mark at 12 o'clock (record groove notch)
+  shape(g, wob(c, c - R * 1.0, R * 0.05, R * 0.05, 0.1, 10), C.yellow, [C.orange], INK, 3);
+  grainOut(g, D, D, 0.16);
+  TABLE.D = D;
+}
+
+// =====================================================================
+//  Layout
+// =====================================================================
+function layout(){
+  W = window.innerWidth; H = window.innerHeight; DPR = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  var cs = getComputedStyle(safeEl); var sT = parseFloat(cs.paddingTop) || 0, sR = parseFloat(cs.paddingRight) || 0, sB = parseFloat(cs.paddingBottom) || 0, sL = parseFloat(cs.paddingLeft) || 0;
+  L.sT = sT; L.sR = sR; L.sB = sB; L.sL = sL; L.port = H >= W * 1.05;
+  var R;
+  if (L.port) {
+    var trayH = clamp(H * 0.135, 84, 150), ingH = clamp(H * 0.105, 70, 130), tw = W - sL - sR;
+    var zt = sT + 8, zb = H - sB - trayH - ingH;
+    R = Math.min(tw * 0.395, (zb - zt) * 0.355); L.R = R; L.cx = sL + tw / 2;
+    var hr0 = clamp(R * 0.165, 20, 62), topNeed = R + hr0 * 2.85, botNeed = R + ingH * 1.05;
+    var free = (H - sB - trayH) - zt - topNeed - botNeed;
+    L.cy = zt + topNeed + Math.max(0, free) * 0.5;
+    var iyFix = L.cy + R + ingH * 0.55 + Math.max(0, free) * 0.14;
+    L.traySd = Math.min(trayH * 0.74, tw / 4 * 0.76, R * 0.6);
+    L.trayPos = TOOLS.map(function(t, i){ return { x: sL + tw * (i + 0.5) / 4, y: H - sB - trayH / 2 - 2 }; });
+    L.sheet = { x: sL + 8, y: H - sB - trayH + 4, w: tw - 16, h: trayH - 10 };
+    var iy = iyFix; L.ingSz = Math.min(ingH * 0.86, R * 0.6);
+    L.basket = { x: L.cx - Math.min(tw * 0.2, R * 0.75), y: iy }; L.bowl = { x: L.cx + Math.min(tw * 0.2, R * 0.75), y: iy };
+    L.counter = { x: L.cx, y: iy + L.ingSz * 0.28, rx: Math.min(tw * 0.42, R * 1.35), ry: L.ingSz * 0.3 };
+  } else {
+    var trayW = clamp(W * 0.1, 92, 140), ingW = clamp(W * 0.13, 100, 180), th = H - sT - sB;
+    var zl = sL + 8, zr = W - sR - trayW - ingW;
+    R = Math.min((zr - zl) * 0.36, th * 0.37); L.R = R; L.cx = (zl + zr) / 2; L.cy = sT + th / 2 + R * 0.05;
+    L.traySd = Math.min(trayW * 0.74, th / 4 * 0.74, R * 0.55);
+    var tx = W - sR - trayW / 2 - 2;
+    L.trayPos = TOOLS.map(function(t, i){ return { x: tx, y: sT + th * (i + 0.5) / 4 }; });
+    L.sheet = { x: W - sR - trayW + 4, y: sT + 8, w: trayW - 10, h: th - 16 };
+    var ix = zr + ingW * 0.5; L.ingSz = Math.min(ingW * 0.82, R * 0.6);
+    L.basket = { x: ix, y: L.cy - R * 0.42 }; L.bowl = { x: ix, y: L.cy + R * 0.42 };
+    L.counter = { x: ix, y: L.cy, rx: ingW * 0.46, ry: R * 0.85 };
+  }
+  L.sd = R * 0.42; L.ringR = R * 0.795; L.plateD = R * 0.41; L.hr = clamp(R * 0.165, 20, 62);
+  L.gal = { x: sL + 12, y: sT + 12, s: clamp(R * 0.24, 38, 84) };
+  SPR = {}; buildBG(); buildTable();
+  if (!S.center && S.phase === 'dine') S.center = newPlate();
+  S.cook.forEach(function(p, i){ var q = cookPos(i); if (!p.placed) { p.x = q.x; p.y = q.y; p.placed = true; } });
+}
+function slotAng(i){ return -Math.PI / 2 + i * TAU / NS + S.rot; }
+function slotPos(i){ var a = slotAng(i), w = S.tableWob * Math.sin(S.T * 30) * 2; return { x: L.cx + Math.cos(a) * L.ringR + w, y: L.cy + Math.sin(a) * L.ringR }; }
+var COOKP = [[-0.3, -0.13], [0.3, -0.13], [0, 0.27]];
+function cookPos(i){ var p = COOKP[i], c = Math.cos(S.rot), s = Math.sin(S.rot), x = p[0] * L.R, y = p[1] * L.R; return { x: L.cx + x * c - y * s, y: L.cy + x * s + y * c }; }
+function gPlatePos(gi){ var a = GANG[gi]; return { x: L.cx + Math.cos(a) * L.R * 0.38, y: L.cy + Math.sin(a) * L.R * 0.38 }; }
+function centerPos(){ return { x: L.cx, y: L.cy + L.R * 0.03 }; }
+function stackPos(){ return { x: L.cx, y: L.cy + L.R * 0.41 }; }
+function headPos(i){
+  var a = GANG[i], d = L.R + L.hr * lerp(1.7, 0.92, S.seatV), x = L.cx + Math.cos(a) * d, y = L.cy + Math.sin(a) * d;
+  x = clamp(x, L.sL + L.hr * 1.05, W - L.sR - L.hr * 1.05); y = clamp(y, L.sT + L.hr * 1.05, H - L.sB - L.hr);
+  return { x: x, y: y, a: a };
+}
+function cupPos(i){ var h = headPos(i), r = L.hr; if (i === 0) return { x: h.x + r * 1.75, y: h.y + r * 0.45 };
+  return { x: h.x + (i === 1 ? -1 : 1) * r * 1.35, y: h.y + r * 1.25 }; }
+function bubblePos(i){ var h = headPos(i), r = L.hr; if (i === 0) return { x: h.x - r * 2.05, y: h.y - r * 0.35 };
+  return { x: clamp(h.x + (i === 1 ? 1 : -1) * r * 0.35, L.sL + r, W - L.sR - r), y: h.y + r * 2.15 }; }
+function framePos(){ var g = L.gal, n = Math.min(S.pics.length, 3); return { x: g.x + g.s * (0.5 + n * 1.12) + g.s * 0.2, y: g.y + g.s * 0.7, s: g.s * 1.35 }; }
+function ingPos(src){ return src === 'bowl' ? L.bowl : L.basket; }
+
+// =====================================================================
+//  Cooking rules (加工規則は固定)
+// =====================================================================
+function cp(f, o){ var n = {}; for (var k in f) n[k] = f[k]; for (k in o) n[k] = o[k]; return n; }
+function applyTool(f, tool){
+  function R(nf, ch, src){ return { f: nf, ch: ch, src: src || null }; }
+  if (tool === 'board') {
+    if (!f) return R({ k: 'chop', lvl: 1 }, 'pull', 'basket');
+    if (f.k === 'chop') return f.lvl < 3 ? R(cp(f, { lvl: f.lvl + 1 }), 'change') : R(f, 'same');
+    if (f.k === 'grill') return R({ k: 'salad', lvl: f.lvl }, 'change');
+    return R(f, 'same');
+  }
+  if (tool === 'pan') {
+    if (!f) return R({ k: 'grill', lvl: 1 }, 'pull', 'basket');
+    if (f.k === 'chop') return R({ k: 'jam', lvl: 1 }, 'change');
+    if (f.k === 'grill') return f.lvl < 3 ? R(cp(f, { lvl: f.lvl + 1 }), 'change') : R(f, 'same');
+    if (f.k === 'jam') return f.lvl < 2 ? R(cp(f, { lvl: 2 }), 'change') : R(f, 'same');
+    if (f.k === 'syrup') return R({ k: 'jam', lvl: 2 }, 'change');
+    if (f.k === 'batter') return R(f.thin ? { k: 'crepe', lvl: 1, berry: !!f.berry } : { k: 'cake', lvl: 1, m: f.lvl, berry: !!f.berry }, 'change');
+    if (f.k === 'cake' || f.k === 'crepe') return f.lvl < 4 ? R(cp(f, { lvl: f.lvl + 1 }), 'change') : R(f, 'same');
+    return R(f, 'same');
+  }
+  if (tool === 'whisk') {
+    if (!f) return R({ k: 'batter', lvl: 1 }, 'pull', 'bowl');
+    if (f.k === 'batter') return f.lvl < 3 ? R(cp(f, { lvl: f.lvl + 1 }), 'change') : R(f, 'same');
+    if (f.k === 'chop') return R({ k: 'batter', lvl: 1, berry: true }, 'change');
+    return R(f, 'same');
+  }
+  if (tool === 'kettle') {
+    if (f && f.k === 'jam') return R({ k: 'syrup' }, 'change');
+    if (f && f.k === 'batter' && !f.thin) return R(cp(f, { thin: true }), 'change');
+    return R(f, 'same');
+  }
+  return R(f, 'same');
+}
+function heat(f){ if (!f) return f; if (f.k === 'grill' && f.lvl < 3) return cp(f, { lvl: f.lvl + 1 });
+  if ((f.k === 'cake' || f.k === 'crepe') && f.lvl < 4) return cp(f, { lvl: f.lvl + 1 }); if (f.k === 'jam' && f.lvl < 2) return cp(f, { lvl: 2 }); return f; }
+function simulateRing(){ var f = null; for (var i = 0; i < NS; i++) if (S.slots[i].tool) f = applyTool(f, S.slots[i].tool).f; return f; }
+function cookingPlate(){ if (S.phase === 'cook') return S.cook[S.active] || null; if (S.phase === 'dine') return S.center; return null; }
+
+// =====================================================================
+//  Particles / flyers / trails
+// =====================================================================
+function part(x, y, o){ if (S.parts.length >= MAXP) S.parts.shift(); var p = { x: x, y: y, vx: o.vx || 0, vy: o.vy || 0, life: o.life || 1, max: o.life || 1, s: o.s || 4, col: o.col || '#fff', t: o.t || 'dust', g: o.g == null ? 0 : o.g, rot: rnd(0, 6) }; S.parts.push(p); return p; }
+function burst(x, y, n, cols, sp, t, s){ for (var i = 0; i < n; i++) { var a = rnd(0, TAU), v = rnd(0.3, 1) * sp; part(x, y, { vx: Math.cos(a) * v, vy: Math.sin(a) * v - sp * 0.3, life: rnd(0.5, 1.1), s: rnd(0.6, 1.2) * (s || L.R * 0.03), col: cols[i % cols.length], t: t || 'dust', g: sp * 1.2 }); } }
+function steam(x, y, n){ for (var i = 0; i < n; i++) part(x + rnd(-8, 8), y, { vx: rnd(-8, 8), vy: -rnd(20, 45), life: rnd(0.8, 1.5), s: rnd(5, 10) * L.R / 150, col: '#ffffff', t: 'steam' }); }
+function flyer(o){ S.flyers.push({ spr: o.spr, x0: o.x0, y0: o.y0, x1: o.x1, y1: o.y1, t: 0, dur: o.dur || 0.45, arc: o.arc == null ? 0.25 : o.arc, s0: o.s0 || 1, s1: o.s1 || 1, onLand: o.onLand || null, rot: o.rot || 0, tgt: o.tgt || null }); }
+
+// =====================================================================
+//  Core actions
+// =====================================================================
+var restNow = 0;
+function useTool(tool, si, manual){
+  var P = cookingPlate(); var sl = si != null ? S.slots[si] : null;
+  if (sl) { sl.hit = 1; sl.vs -= 3; }
+  S.beat = 1; var pos = sl ? slotPos(si) : L.trayPos[TOOLS.indexOf(tool)];
+  var fast = S.combo >= 2;
+  if (tool !== 'pan') holdEnd();
+  if (!P) { playToolSound(tool, null, fast); return; }
+  var old = P.food, res = applyTool(old, tool);
+  if (res.ch !== 'same') {
+    P.prev = old; P.food = res.f; P.morph = 0; P.wob = 1; P.order += tool[0];
+    if (res.ch === 'pull') { var ip = ingPos(res.src); P.fly = { x: ip.x, y: ip.y, t: 0 }; if (res.src === 'basket') { S.basket = Math.max(1, S.basket - 1); S.basketPop = 1; } else S.bowlPop = 1; }
+    if (old && old.k === 'chop' && res.f.k === 'jam' && !S.disc.d1) { S.disc.d1 = 1; logEv('d1', 'chop+pan=jam'); }
+    if (old && old.k === 'batter' && (res.f.k === 'cake' || res.f.k === 'crepe') && !S.disc.d2) { S.disc.d2 = 1; logEv('d2', 'batter+pan=' + res.f.k); }
+    if (old && old.k === 'grill' && res.f.k === 'salad') logEv('salad', 'grill+board');
+  } else { P.wob = 0.5; if (tool === 'board' && old && old.k === 'chop') P.wob = 1; }
+  // combo: rapid touches chop finer & grow amount
+  if (manual && tool === 'board' && P.food && P.food.k === 'chop' && S.combo >= 3 && P.food.lvl < 3) { P.prev = P.food; P.food = cp(P.food, { lvl: P.food.lvl + 1 }); P.morph = 0; }
+  playToolSound(tool, P.food, fast);
+  toolFx(tool, pos, P);
+  if (tool === 'pan') { holdBegin(P); }
+  if (tool === 'kettle') pourTea(P, pos);
+  S.guests.forEach(function(g){ if (!g.reach) g.lookAt = { x: P.x, y: P.y, t: 0.7 }; if (g.favTool === tool) { g.cheer = Math.max(g.cheer, 0.5); } });
+}
+function playToolSound(tool, f, fast){
+  if (!AC) return;
+  if (tool === 'pan') SFX.sizzle(f && f.lvl ? f.lvl : 1);
+  else if (tool === 'board') SFX.chop(2 + Math.min(4, S.combo), fast);
+  else if (tool === 'whisk') SFX.whisk(f && f.k === 'batter' ? f.lvl : 1);
+  else if (tool === 'kettle') SFX.pour(0.4);
+}
+function toolFx(tool, pos, P){
+  var u = L.R / 150;
+  if (tool === 'pan') { steam(P.x, P.y - L.plateD * 0.2, 4); burst(P.x, P.y, 5, [C.orange, C.yellow], 60 * u, 'dust'); }
+  else if (tool === 'board') burst(P.x, P.y, 6, [C.straw, '#ffd0d0', C.yellow], 70 * u, 'chip', 3 * u);
+  else if (tool === 'whisk') burst(P.x, P.y, 6, ['#fff2c8', '#ffffff'], 55 * u, 'dust', 4 * u);
+  else if (tool === 'kettle') steam(pos.x, pos.y - L.sd * 0.3, 5);
+  burst(pos.x, pos.y, 4, [TCOL[tool], '#ffffff'], 50 * u, 'dust', 3 * u);
+}
+function pourTea(P, pos){
+  var gs = S.guests.slice().sort(function(a, b){ return a.cup.fill - b.cup.fill; }), g = gs[0];
+  var berryish = P && P.food && /chop|jam|syrup|grill|salad/.test(P.food.k);
+  g.cup.fill = Math.min(1, g.cup.fill + 0.5); g.cup.tint = berryish ? '#ff7a96' : '#d99a4b'; g.cup.pop = 1;
+  var cpos = cupPos(g.i);
+  for (var k = 0; k < 8; k++) { var t = k / 8; part(lerp(pos.x, cpos.x, t), lerp(pos.y, cpos.y, t) - Math.sin(t * Math.PI) * L.R * 0.25, { vx: 0, vy: 10, life: 0.4 + t * 0.4, s: 3 * L.R / 150, col: '#bfe2ff', t: 'drop' }); }
+  steam(cpos.x, cpos.y - L.hr * 0.4, 4); g.lookAt = { x: cpos.x, y: cpos.y, t: 1 }; g.happy = Math.max(g.happy, 0.6);
+}
+function holdBegin(P){ S.hold = { lvl: P && P.food && P.food.lvl ? P.food.lvl : 1 }; holdStart(S.hold.lvl); }
+function holdEnd(){ if (S.hold) { S.hold = null; holdStop(); } }
+function holdStep(){
+  var P = cookingPlate(); if (!P) return;
+  var nf = heat(P.food); if (nf !== P.food) { P.prev = P.food; P.food = nf; P.morph = 0; }
+  P.wob = 0.6; steam(P.x, P.y - L.plateD * 0.2, 3); holdTune(P.food && P.food.lvl ? P.food.lvl : 1);
+  noise(0.2, { ft: 'highpass', f: 3500, vol: 0.06 });
+}
+
+// ---------- the record arm passing slots ----------
+function onEnterSlot(i){
+  var sl = S.slots[i]; S.beat = 1; S.restNow = 0;
+  if (sl.tool) {
+    endRun();
+    if (sl.skipLap === S.lap) { sl.hit = 0.6; SFX.tick(); return; }
+    useTool(sl.tool, i, false);
+  } else if (sl.rest) {
+    holdEnd(); S.restNow = 1; restEnter(i);
+  } else {
+    endRun();
+    if (S.hold) holdStep(); else SFX.tick(true);
+  }
+}
+function lapEnd(){
+  S.lap++; S.lapSingles = [];
+  var P = cookingPlate(); if (!P) return;
+  var f = P.food;
+  var order = S.slots.map(function(s){ return s.tool ? s.tool[0] : (s.rest ? '-' : '.'); }).join('');
+  if (f && FINAL[f.k] && !P.done) {
+    S.mem.made.push(fam(f)); S.mem.orders.push(order); if (S.mem.made.length > 40) { S.mem.made.shift(); S.mem.orders.shift(); }
+    var tgt = (f.k === 'jam' || f.k === 'syrup') ? toppingTarget(P) : null;
+    if (tgt) {
+      var top = f.k === 'jam' ? 'jam' : 'syrup'; var sp = foodSpr(f, L.plateD);
+      flyer({ spr: sp, x0: P.x, y0: P.y, x1: tgt.x, y1: tgt.y - L.plateD * 0.1, dur: 0.7, arc: 0.4, s0: 1, s1: 0.6, tgt: tgt, onLand: function(){
+        if (tgt.food && (tgt.food.k === 'cake' || tgt.food.k === 'crepe')) { tgt.prev = tgt.food; tgt.food = cp(tgt.food, { top: top }); tgt.morph = 0; tgt.wob = 1; tgt.order += '+'; }
+        burst(tgt.x, tgt.y, 10, [C.red, '#ffffff', C.yellow], 90 * L.R / 150, 'spark'); SFX.success();
+        if (!S.disc.d2b) { S.disc.d2b = 1; logEv('d2b', top + ' on pancake'); }
+        S.guests.forEach(function(g){ if (g.plate === tgt) { if (g.desire === 'top') { g.happy = 1.5; SFX.happy(); } } g.lookAt = { x: tgt.x, y: tgt.y, t: 1 }; });
+      } });
+      P.food = null; P.prev = null; P.order = ''; P.morph = 1; S.lastDish = 'top';
+      return;
+    }
+    // served
+    checkD6(f);
+    S.lastDish = f.k;
+    P.done = true; P.glow = 1; P.wob = 1; burst(P.x, P.y, 12, [C.yellow, '#ffffff', C.orange, C.green], 100 * L.R / 150, 'spark'); SFX.success();
+    logEv('dish', f.k + ' [' + order + ']');
+    S.guests.forEach(function(g){ g.lookAt = { x: P.x, y: P.y, t: 1.2 }; g.happy = Math.max(g.happy, 0.8); });
+    if (S.phase === 'cook') {
+      var nx = -1; for (var k = 0; k < 3; k++) if (!S.cook[k].done) { nx = k; break; }
+      if (nx < 0) startTurn(); else S.active = nx;
+    } else tryDeliver();
+  }
+}
+function checkD6(f){ if (S.swapPB && (f.k === 'jam' || f.k === 'salad') && S.swapRef !== f.k) { if (!S.disc.d6) { S.disc.d6 = 1; logEv('d6', (S.swapRef || '-') + '->' + f.k); } S.swapPB = false; } }
+function toppingTarget(P){
+  var list = [];
+  if (S.phase === 'cook') list = S.cook.filter(function(p){ return p !== P && p.done && p.food && (p.food.k === 'cake' || p.food.k === 'crepe') && !p.food.top; });
+  else S.guests.forEach(function(g){ var p = g.plate; if (p && !p.ret && p.food && (p.food.k === 'cake' || p.food.k === 'crepe') && !p.food.top && p.amount > 0.25) list.push(p); });
+  return list[0] || null;
+}
+function tryDeliver(){
+  var c = S.center; if (!c || !c.done || !c.food) return;
+  var waits = S.guests.filter(function(g){ return !g.plate; }); if (!waits.length) return;
+  var fm = fam(c.food), pick = null; waits.forEach(function(g){ if (!pick && g.desire === fm) pick = g; }); var match = !!pick; if (!pick) pick = waits[0];
+  pick.plate = c; c.amount = 1; c.done = true; c.glow = 1;
+  S.center = newPlate(); var cp0 = centerPos(); S.center.x = cp0.x; S.center.y = cp0.y; S.center.placed = true; S.center.pop = 1;
+  pick.lookAt = { x: c.x, y: c.y, t: 1.2 }; pick.happy = match ? 1.6 : 0.8; if (match) { SFX.happy(); burst(c.x, c.y, 8, [C.yellow, '#fff'], 80 * L.R / 150, 'spark'); }
+  pick.desire = null; logEv('deliver', 'g' + pick.i + ' ' + fm + (match ? ' match' : ''));
+}
+
+// ---------- rests: eating ----------
+function nearestGuests(ang){ return S.guests.slice().sort(function(a, b){ return angDiff(GANG[a.i], ang) - angDiff(GANG[b.i], ang) || a.i - b.i; }); }
+function hasFood(g){ return g.plate && !g.plate.ret && g.plate.food && g.plate.amount > 0.01; }
+function restEnter(i){
+  var prev = S.slots[(i + NS - 1) % NS];
+  if (!S.run || !prev.rest) startRun(i);
+  else S.run.idx++;
+  runStep();
+}
+function startRun(i){
+  var len = 0; while (len < NS && S.slots[(i + len) % NS].rest) len++;
+  var cAng = slotAng(i) + (len - 1) / 2 * TAU / NS - S.rot;
+  var near = nearestGuests(cAng), eater = null, partner = null;
+  if (S.phase === 'dine') {
+    var cands = near.filter(hasFood);
+    eater = cands[0] || null;
+    if (len === 1 && eater && S.lapSingles.length && S.lapSingles[S.lapSingles.length - 1] === eater.i && cands.length > 1) eater = cands[1];
+    if (len >= 2 && eater) { var endAng = slotAng((i + len - 1) % NS) - S.rot; var pn = nearestGuests(endAng).filter(function(g){ return g !== eater; }); partner = pn[0] || null; }
+  } else {
+    eater = near[0];
+  }
+  S.run = { start: i, len: len, idx: 0, eater: eater, partner: partner, lap: S.lap, shared: false };
+}
+function endRun(){ S.run = null; }
+function runStep(){
+  var r = S.run; SFX.clink(); var sp = slotPos(r.start + r.idx);
+  burst(sp.x, sp.y, 3, ['#cfe0ff', '#ffffff'], 30 * L.R / 150, 'dust');
+  if (!r.eater) { S.guests.forEach(function(g){ g.lookAt = { x: sp.x, y: sp.y, t: 0.6 }; }); return; }
+  var g = r.eater;
+  if (S.phase === 'dine') {
+    if (!hasFood(g)) { if (g.cup.fill > 0.1) sipTea(g); return; }
+    bite(g, g.plate, 0.17);
+    if (!S.disc.d3) { S.disc.d3 = 1; logEv('d3', 'g' + g.i + ' eats at rest'); }
+    if (r.len === 1) {
+      S.lapSingles.push(g.i);
+      var u = {}; S.lapSingles.forEach(function(k){ u[k] = 1; });
+      if (Object.keys(u).length >= 2 && !S.disc.d4) { S.disc.d4 = 1; logEv('d4', 'alternate g' + S.lapSingles.join(',g')); }
+    } else {
+      if (r.idx === 1 && r.partner && !r.shared && Math.random() < 0.4 && hasFood(g)) { r.shared = true; bite(r.partner, g.plate, 0.12); r.partner.happy = 1; }
+      if (r.idx === r.len - 1 && r.partner) S.pendingSwap = { a: g, b: r.partner, t: 0.55 };
+    }
+  } else {
+    // 三皿そろう前は味見だけ
+    var best = null, bd = 1e9, hp = headPos(g.i);
+    S.cook.forEach(function(p){ if (p.done && p.food && p.amount > 0.72) { var d = dist(p.x, p.y, hp.x, hp.y); if (d < bd) { bd = d; best = p; } } });
+    if (best) { bite(g, best, r.len >= 2 ? 0.05 : 0.04, 0.72); if (!S.disc.d3) { S.disc.d3 = 1; logEv('d3', 'g' + g.i + ' tastes at rest'); } }
+    else if (g.cup.fill > 0.1) sipTea(g);
+    else g.lookAt = { x: sp.x, y: sp.y, t: 0.8 };
+  }
+}
+function bite(g, p, amt, floor){
+  p.amount = Math.max(floor || 0, p.amount - amt); p.wob = 0.8;
+  g.reach = { x: p.x, y: p.y, t: 0, dur: 0.75 }; g.eatT = 0.9; g.happy = Math.max(g.happy, 0.6); g.lookAt = { x: p.x, y: p.y, t: 1 };
+  var hp = headPos(g.i); burst(lerp(p.x, hp.x, 0.6), lerp(p.y, hp.y, 0.6), 4, foodCols(p.food), 40 * L.R / 150, 'chip', 2.5 * L.R / 150);
+  setTimeout(function(){ SFX.munch(); }, 160);
+  if (p.amount <= 0.01 && !floor) finishPlate(g);
+}
+function sipTea(g){ g.cup.fill = Math.max(0, g.cup.fill - 0.25); g.cup.sip = 1; g.happy = Math.max(g.happy, 0.5); var c = cupPos(g.i); g.reach = { x: c.x, y: c.y, t: 0, dur: 0.7 }; SFX.sip(); steam(c.x, c.y - L.hr * 0.3, 2); }
+function foodCols(f){ if (!f) return ['#fff']; if (f.k === 'cake' || f.k === 'crepe') return [DONE[f.lvl] || '#e9b25a', '#fff2c0', f.top ? C.red : '#ffe46a']; if (f.k === 'salad') return ['#a8302a', C.green]; return [C.straw, '#ffd0d0']; }
+function finishPlate(g){
+  var p = g.plate; if (!p) return; var fm = fam(p.food);
+  if (fm) { S.mem.ate[g.i].push(fm); if (S.mem.ate[g.i].length > 20) S.mem.ate[g.i].shift(); }
+  p.food = null; p.ret = true; p.retT = 0; S.returning.push(p); g.plate = null; g.happy = 1.2;
+  g.desire = nextDesire(g.i); g.pointT = 1.2;
+  S.emptied++; logEv('empty', 'g' + g.i + ' ate ' + fm + ' -> wants ' + g.desire);
+}
+function nextDesire(gi){
+  var ate = S.mem.ate[gi], last = ate[ate.length - 1];
+  var NEXT = { jam: ['cake', 'top'], cake: ['jam', 'top', 'salad'], salad: ['cake', 'top'], top: ['salad', 'jam'] };
+  var opts = (NEXT[last] || ['jam', 'cake', 'salad']).slice();
+  var prev = ate[ate.length - 2]; if (opts.length > 1 && prev) opts = opts.filter(function(o){ return o !== prev; }) .concat([]);
+  if (!opts.length) opts = ['jam'];
+  return opts[Math.floor(Math.random() * opts.length)];
+}
+function doSwap(a, b){
+  var pa = a.plate && !a.plate.ret ? a.plate : null, pb = b.plate && !b.plate.ret ? b.plate : null;
+  if (!pa && !pb) return;
+  a.plate = pb; b.plate = pa;
+  [a, b].forEach(function(g){ var o = g === a ? b : a; var hp = headPos(o.i); g.lookAt = { x: hp.x, y: hp.y, t: 1.2 }; if (g.plate) { g.reach = { x: g.plate.x, y: g.plate.y, t: 0, dur: 0.8 }; g.plate.wob = 1;
+    if (g.desire && fam(g.plate.food) === g.desire) { g.happy = 1.6; g.desire = null; } else g.happy = Math.max(g.happy, 0.9); } });
+  SFX.clink(); setTimeout(function(){ SFX.clink(); }, 120); SFX.happy();
+  if (!S.disc.d5) { S.disc.d5 = 1; } logEv('d5', 'swap g' + a.i + '<->g' + b.i);
+}
+
+// ---------- sticker operations ----------
+function orderPB(){ var b = slotsOf('board'), p = slotsOf('pan'); return (b.length && p.length) ? (b[0] < p[0] ? 1 : -1) : 0; }
+function notePB(before){ var after = orderPB(); if (before && after && before !== after) { S.swapPB = true; S.swapRef = S.lastDish; logEv('swapPB', before + '->' + after); } }
+function nextSlot(){ for (var k = 1; k <= NS; k++) { var j = (S.lastPlaced + k) % NS; if (!S.slots[j].tool) return j; } return -1; }
+function headSlot(){ return Math.floor(S.head) % NS; }
+function placeAt(j, tool, from){
+  var sl = S.slots[j], pb0 = orderPB();
+  if (sl.tool) { var op = slotPos(j), ti = TOOLS.indexOf(sl.tool); flyer({ spr: toolSpr(sl.tool, L.sd), x0: op.x, y0: op.y, x1: L.trayPos[ti].x, y1: L.trayPos[ti].y, dur: 0.4, s1: L.traySd / L.sd }); }
+  var wasRest = sl.rest;
+  sl.tool = tool; sl.rest = false; sl.sc = 1.38; sl.vs = 0; sl.hit = 1; sl.wob = 1;
+  S.lastPlaced = j; S.ever[tool] = 1;
+  sl.skipLap = (S.started && j > headSlot()) ? S.lap : -1;
+  SFX.place();
+  var p = slotPos(j); burst(p.x, p.y, 7, [TCOL[tool], '#ffffff', C.yellow], 90 * L.R / 150, 'dust');
+  notePB(pb0);
+  useTool(tool, j, true);
+  logEv('place', tool + '@' + j + (wasRest ? '(rest)' : ''));
+}
+function tapTray(ti){
+  var tool = TOOLS[ti], j = nextSlot(), tp = L.trayPos[ti];
+  S.tray[ti].vs -= 4;
+  if (j < 0) { SFX.nope(); S.tray[ti].wob = 1; return; }
+  var sp = slotPos(j);
+  placeAt(j, tool);
+  S.slots[j].fromX = tp.x; S.slots[j].fromY = tp.y; S.slots[j].arrive = 0;
+  addTrail(tp.x, tp.y, sp.x, sp.y, TCOL[tool]);
+}
+function peelSlot(j, x, y){
+  var sl = S.slots[j], tool = sl.tool; if (!tool) return;
+  sl.tool = null; sl.rest = true; sl.sc = 1; sl.hit = 0; sl.wob = 1;
+  var ti = TOOLS.indexOf(tool), sp = slotPos(j);
+  flyer({ spr: toolSpr(tool, L.sd), x0: x == null ? sp.x : x, y0: y == null ? sp.y : y, x1: L.trayPos[ti].x, y1: L.trayPos[ti].y, dur: 0.45, s1: L.traySd / L.sd, rot: 0.6 });
+  S.tray[ti].vs -= 3;
+  SFX.peel(); burst(sp.x, sp.y, 6, ['#cfe0ff', '#ffffff', TCOL[tool]], 70 * L.R / 150, 'dust');
+  if (S.phase === 'dine') S.peeledDine++;
+  S.guests.forEach(function(g){ g.lookAt = { x: sp.x, y: sp.y, t: 0.8 }; });
+  logEv('peel', tool + '@' + j);
+}
+function moveSlot(a, b){
+  var A = S.slots[a], B = S.slots[b], pb0 = orderPB();
+  if (B.tool) {
+    var ta = A.tool, tb = B.tool; A.tool = tb; B.tool = ta; A.sc = B.sc = 1.3; A.hit = B.hit = 1;
+    SFX.place(); setTimeout(function(){ SFX.place(); }, 90);
+    logEv('swap', ta + '<->' + tb);
+  } else {
+    B.tool = A.tool; B.rest = false; B.sc = 1.35; B.hit = 1; A.tool = null; A.rest = true; A.wob = 1;
+    SFX.place(); logEv('move', B.tool + ' ' + a + '->' + b);
+  }
+  var pb = slotPos(b); burst(pb.x, pb.y, 6, [TCOL[B.tool] || '#fff', '#fff'], 80 * L.R / 150, 'dust');
+  S.lastPlaced = b; notePB(pb0);
+}
+function addTrail(x0, y0, x1, y1, col){ var n = 14; for (var k = 0; k <= n; k++) pushTrail(lerp(x0, x1, k / n), lerp(y0, y1, k / n), col, k === 0); }
+function pushTrail(x, y, col, brk){ if (S.trails.length > 260) S.trails.shift(); S.trails.push({ x: x, y: y, col: col, life: 1, brk: !!brk, w: rnd(0.8, 1.2) }); }
+
+// ---------- phases ----------
+function startTurn(){
+  S.phase = 'turn'; S.turnT = 0; holdEnd(); endRun(); S.drag = null;
+  // assign plates by desire (記憶)
+  var plates = S.cook.slice(), assign = [null, null, null];
+  S.guests.forEach(function(g){ if (g.desire) { for (var k = 0; k < plates.length; k++) if (plates[k] && fam(plates[k].food) === g.desire) { assign[g.i] = plates[k]; plates[k] = null; break; } } });
+  S.guests.forEach(function(g){ if (!assign[g.i]) { for (var k = 0; k < plates.length; k++) if (plates[k]) { assign[g.i] = plates[k]; plates[k] = null; break; } } });
+  S.guests.forEach(function(g){ g.plate = assign[g.i]; if (g.plate) { g.plate.done = true; g.plate.amount = 1; if (g.desire && fam(g.plate.food) === g.desire) g.happy = 1.6; g.desire = null; } });
+  SFX.whoosh(); logEv('turn', 'three dishes');
+}
+function finishTurn(){ S.phase = 'dine'; S.rot = 0; S.cook = []; S.center = newPlate(); var c = centerPos(); S.center.x = c.x; S.center.y = c.y; S.center.placed = true; S.center.pop = 1; S.basket = 5; S.basketPop = 1; }
+function startParty(){ S.party = true; S.partyT = 0; SFX.fanfare(); logEv('party', 'emptied ' + S.emptied);
+  for (var k = 0; k < 24; k++) { var a = rnd(0, TAU); part(L.cx + Math.cos(a) * L.R * 0.3, L.cy + Math.sin(a) * L.R * 0.3, { vx: Math.cos(a) * rnd(60, 160), vy: Math.sin(a) * rnd(60, 160) - 80, life: rnd(1, 1.8), s: rnd(3, 6) * L.R / 150, col: [C.red, C.yellow, C.orange, C.green, '#fff'][k % 5], t: 'confetti', g: 160 }); }
+  S.guests.forEach(function(g){ g.cheer = 2; g.happy = 2; }); }
+function savePicture(){
+  draw(true);
+  var src = null;
+  try {
+    var w = 300, h = Math.round(300 * H / W), c = document.createElement('canvas'); c.width = w; c.height = h;
+    var g = c.getContext('2d'); g.drawImage(cv, 0, 0, cv.width, cv.height, 0, 0, w, h);
+    g.lineWidth = 10; g.strokeStyle = '#ffb52a'; g.strokeRect(5, 5, w - 10, h - 10); g.lineWidth = 3; g.strokeStyle = C.ink; g.strokeRect(1.5, 1.5, w - 3, h - 3);
+    src = c.toDataURL('image/jpeg', 0.6);
+  } catch (e) { src = null; }
+  if (src) addPic(src);
+  S.cycle++; var ok = storeSave(); logEv('save', ok ? 'stored' : 'memory-only(' + S.store + ')');
+  S.flash = 1; SFX.shutter();
+  S.party = false;
+  startTurnBack();
+}
+function startTurnBack(){
+  S.phase = 'turnback'; S.turnT = 0; holdEnd(); endRun(); S.drag = null; SFX.whoosh();
+  S.guests.forEach(function(g){ if (g.plate) { g.plate.ret = true; g.plate.retT = 0; S.returning.push(g.plate); g.plate = null; } if (!g.desire) g.desire = nextDesire(g.i); });
+  if (S.center) { S.center.ret = true; S.center.retT = 0; S.returning.push(S.center); S.center = null; }
+}
+function finishTurnBack(){
+  S.phase = 'cook'; S.rot = 0; S.cook = [newPlate(), newPlate(), newPlate()];
+  S.cook.forEach(function(p, i){ var q = cookPos(i); p.x = q.x; p.y = q.y; p.placed = true; p.pop = 1 + i * 0.3; });
+  S.active = 0; S.emptied = 0; S.used = 0; S.returning = []; S.basket = 5; S.basketPop = 1; S.peeledDine = 0;
+  logEv('cycle', 'new cycle ' + S.cycle);
+}
+
+// =====================================================================
+//  Invite (one thing at a time) & demo hand
+// =====================================================================
+function trayInv(tool){ return { t: 'tray', i: TOOLS.indexOf(tool) }; }
+function slotsOf(tool){ var r = []; S.slots.forEach(function(s, i){ if (s.tool === tool) r.push(i); }); return r; }
+function beforeInv(X, goal){
+  var xs = slotsOf(X), ps = slotsOf('pan');
+  if (!xs.length) return trayInv(X); if (!ps.length) return trayInv('pan');
+  var sim = simulateRing(); if (sim && sim.k === goal) return { t: 'slot', i: xs[0], mode: 'tap' };
+  var pi = ps[0], xi = xs[0], target;
+  if (pi > 0) target = pi - 1; else target = -1;
+  if (target === xi || target < 0) { return { t: 'slot', i: pi, mode: 'move', to: xi + 1 < NS ? xi + 1 : xi }; }
+  return { t: 'slot', i: xi, mode: 'move', to: target };
+}
+function computeInvite(){
+  if (S.view || S.phase === 'turn' || S.phase === 'turnback') return null;
+  if (S.party) return { t: 'frame' };
+  var tools = S.slots.filter(function(s){ return s.tool; }).length;
+  if (S.phase === 'cook') {
+    if (!S.ever.pan) return trayInv('pan');
+    if (!S.ever.board) return trayInv('board');
+    if (!S.disc.d1) return beforeInv('board', 'jam');
+    if (!S.ever.whisk) return trayInv('whisk');
+    if (!S.disc.d2) return beforeInv('whisk', 'cake');
+    if (!S.ever.kettle) return trayInv('kettle');
+    if (!S.disc.d2b && S.cook.some(function(p){ return p.done && p.food && (p.food.k === 'cake' || p.food.k === 'crepe') && !p.food.top; })) return beforeInv('board', 'jam');
+    if (!S.disc.d6 && slotsOf('board').length && slotsOf('pan').length) return { t: 'slot', i: slotsOf('board')[0], mode: 'move', to: slotsOf('pan')[0] };
+    if (!tools) return trayInv('pan');
+    for (var k = 0; k < 4; k++) if (!slotsOf(TOOLS[k]).length && nextSlot() >= 0) return trayInv(TOOLS[k]);
+    return { t: 'slot', i: S.slots.findIndex(function(s){ return s.tool; }), mode: 'tap' };
+  }
+  // dine
+  var hungry = S.guests.filter(hasFood);
+  var restIdx = []; S.slots.forEach(function(s, i){ if (s.rest) restIdx.push(i); });
+  var toolIdx = []; S.slots.forEach(function(s, i){ if (s.tool) toolIdx.push(i); });
+  var waiting = S.guests.filter(function(g){ return !g.plate; });
+  if (hungry.length && toolIdx.length) {
+    var gh = hungry.slice().sort(function(a, b){ return b.plate.amount - a.plate.amount; })[0];
+    function nearestTo(g, filter){ var best = -1, bd = 9; toolIdx.forEach(function(i){ if (filter && !filter(i)) return; var d = angDiff(slotAng(i), GANG[g.i]); if (d < bd) { bd = d; best = i; } }); return best; }
+    if (!S.peeledDine) return { t: 'slot', i: nearestTo(gh), mode: 'peel' };
+    if (!S.disc.d4) {
+      var isSep = function(i){ return !S.slots[(i + 1) % NS].rest && !S.slots[(i + NS - 1) % NS].rest; };
+      var rg = restIdx.map(function(i){ return nearestGuests(slotAng(i) - S.rot)[0].i; });
+      for (var h = 0; h < hungry.length; h++) { if (rg.indexOf(hungry[h].i) >= 0) continue; var c1 = nearestTo(hungry[h], isSep); if (c1 >= 0) return { t: 'slot', i: c1, mode: 'peel' }; }
+      var c2 = toolIdx.filter(isSep)[0]; if (c2 != null) return { t: 'slot', i: c2, mode: 'peel' };
+    }
+    if (!S.disc.d5) {
+      var adj = toolIdx.filter(function(i){ return S.slots[(i + 1) % NS].rest || S.slots[(i + NS - 1) % NS].rest; });
+      if (adj.length) return { t: 'slot', i: adj[0], mode: 'peel' };
+    }
+  }
+  if (!S.disc.d6 && slotsOf('board').length && slotsOf('pan').length && S.peeledDine) return { t: 'slot', i: slotsOf('board')[0], mode: 'move', to: slotsOf('pan')[0] };
+  if (!S.disc.d2b && S.guests.some(function(g){ return hasFood(g) && (g.plate.food.k === 'cake' || g.plate.food.k === 'crepe') && !g.plate.food.top; })) { var bi = beforeInv('board', 'jam'); if (bi) return bi; }
+  if (waiting.length && !(S.center && S.center.done) || toolIdx.length < 2) {
+    var want = waiting[0] && waiting[0].desire ? FAM_TOOL[waiting[0].desire] : 'pan';
+    if (!slotsOf(want).length && nextSlot() >= 0) return trayInv(want);
+    for (var q = 0; q < 4; q++) if (!slotsOf(TOOLS[q]).length && nextSlot() >= 0) return trayInv(TOOLS[q]);
+    if (restIdx.length && nextSlot() >= 0) return trayInv(want);
+  }
+  if (hungry.length && toolIdx.length) return { t: 'slot', i: toolIdx[0], mode: 'peel' };
+  return trayInv('pan');
+}
+function invitePos(inv){
+  if (!inv) return null;
+  if (inv.t === 'tray') return L.trayPos[inv.i];
+  if (inv.t === 'slot') return slotPos(inv.i);
+  if (inv.t === 'frame') return framePos();
+  return null;
+}
+function startDemo(){
+  var inv = S.invite; if (!inv) return;
+  var from = invitePos(inv), to = null;
+  if (inv.t === 'tray') { var j = nextSlot(); to = j >= 0 ? slotPos(j) : null; }
+  else if (inv.t === 'slot') { if (inv.mode === 'peel') to = L.trayPos[TOOLS.indexOf(S.slots[inv.i].tool)] || null; else if (inv.mode === 'move') to = slotPos(inv.to); }
+  var tool = inv.t === 'tray' ? TOOLS[inv.i] : (inv.t === 'slot' ? S.slots[inv.i].tool : null);
+  if (inv.t === 'slot' && inv.mode === 'peel' && to) { var sp = slotPos(inv.i); var a = Math.atan2(sp.y - L.cy, sp.x - L.cx); to = { x: sp.x + Math.cos(a) * L.R * 0.45, y: sp.y + Math.sin(a) * L.R * 0.45 }; }
+  S.demo = { t: 0, from: { x: from.x, y: from.y }, to: to ? { x: to.x, y: to.y } : null, tool: tool, inv: inv };
+  S.demoShown = true;
+}
+
+// =====================================================================
+//  Input (Pointer Events, one finger)
+// =====================================================================
+function ptXY(e){ return { x: e.clientX, y: e.clientY }; }
+function onDown(e){
+  e.preventDefault();
+  audioInit();
+  if (S.ptr !== null && S.ptr !== e.pointerId) return; // 追加の指は無視
+  S.ptr = e.pointerId; try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  var p = ptXY(e), x = p.x, y = p.y;
+  S.idle = 0; S.demo = null; S.demoShown = false;
+  if (!S.started) { S.started = true; S.startFx = 1; logEv('start'); }
+  S.combo = (S.T - S.lastTouchT < 0.6) ? Math.min(4, S.combo + 1) : Math.max(0, S.combo - 1); S.lastTouchT = S.T;
+  if (S.view) { S.view = null; SFX.boop(); return; }
+  if (S.phase === 'turn' || S.phase === 'turnback') { SFX.boop(); return; }
+  // frame (party)
+  if (S.party) { var fp = framePos(); if (dist(x, y, fp.x, fp.y) < Math.max(34, fp.s * 0.7)) { savePicture(); return; } }
+  // gallery thumbs
+  var gl = L.gal; for (var k = 0; k < Math.min(3, S.pics.length); k++) { var pic = S.pics[S.pics.length - 1 - k]; var gx = gl.x + gl.s * (0.5 + k * 1.12), gy = gl.y + gl.s * 0.5;
+    if (Math.abs(x - gx) < gl.s * 0.62 && Math.abs(y - gy) < gl.s * 0.62) { S.view = { pic: pic, t: 0 }; SFX.boop(); return; } }
+  // tray
+  var tr = Math.max(28, L.traySd * 0.62);
+  for (k = 0; k < 4; k++) { var tp = L.trayPos[k]; if (dist(x, y, tp.x, tp.y) < tr) { S.drag = { kind: 'tray', i: k, tool: TOOLS[k], x: x, y: y, sx: x, sy: y, moved: false, vx: 0, vy: 0, lt: S.T }; S.tray[k].sc = 0.8; SFX.press(); return; } }
+  // placed stickers
+  var sr0 = Math.max(26, L.sd * 0.6), best = -1, bd = 1e9;
+  for (k = 0; k < NS; k++) { if (!S.slots[k].tool) continue; var sp = slotPos(k), d = dist(x, y, sp.x, sp.y); if (d < sr0 && d < bd) { bd = d; best = k; } }
+  if (best >= 0) { S.drag = { kind: 'slot', from: best, tool: S.slots[best].tool, x: x, y: y, sx: x, sy: y, moved: false, vx: 0, vy: 0, lt: S.T }; S.slots[best].sc = 0.82; SFX.press(); return; }
+  // guests
+  for (k = 0; k < 3; k++) { var hp = headPos(k); if (dist(x, y, hp.x, hp.y) < L.hr * 1.2) { var gg = S.guests[k]; gg.giggle = 1; gg.happy = Math.max(gg.happy, 0.7); SFX.happy(); return; } }
+  // plates / ingredients / blank slots: small wobble only
+  var plates = allPlates();
+  for (k = 0; k < plates.length; k++) if (dist(x, y, plates[k].x, plates[k].y) < L.plateD * 0.55) { plates[k].wob = 0.5; SFX.boop(); return; }
+  if (dist(x, y, L.basket.x, L.basket.y) < L.ingSz * 0.6) { S.basketPop = 0.6; SFX.boop(); return; }
+  if (dist(x, y, L.bowl.x, L.bowl.y) < L.ingSz * 0.6) { S.bowlPop = 0.6; SFX.boop(); return; }
+  for (k = 0; k < NS; k++) { var bp = slotPos(k); if (dist(x, y, bp.x, bp.y) < L.sd * 0.55) { S.slots[k].wob = 0.6; if (S.slots[k].rest) SFX.clink(); else SFX.boop(); return; } }
+  S.tableWob = 0.4; SFX.boop(); burst(x, y, 3, ['#ffffff', C.yellow], 30 * L.R / 150, 'dust', 2 * L.R / 150);
+}
+var lastDustT = 0;
+function onMove(e){
+  if (e.pointerId !== S.ptr) return; e.preventDefault();
+  var d = S.drag; if (!d) return; var p = ptXY(e), dt = Math.max(0.008, S.T - d.lt);
+  d.vx = lerp(d.vx, (p.x - d.x) / dt, 0.4); d.vy = lerp(d.vy, (p.y - d.y) / dt, 0.4); d.lt = S.T;
+  if (!d.moved && dist(p.x, p.y, d.sx, d.sy) > 10) { d.moved = true; if (d.kind === 'slot') { SFX.peel(); } }
+  if (d.moved) {
+    var px = d.x, py = d.y; d.x = p.x; d.y = p.y;
+    if (dist(px, py, p.x, p.y) > 3) pushTrail(p.x, p.y, TCOL[d.tool], false);
+    if (Math.random() < 0.5) part(p.x + rnd(-6, 6), p.y + rnd(-6, 6), { vx: rnd(-20, 20), vy: rnd(-10, 25), life: rnd(0.4, 0.8), s: rnd(1.5, 3.5) * L.R / 150, col: TCOL[d.tool], t: 'dust', g: 40 });
+    if (S.T - lastDustT > 0.09) { lastDustT = S.T; SFX.dust(); }
+  } else { d.x = p.x; d.y = p.y; }
+}
+function nearestSlot(x, y, maxD){ var best = -1, bd = maxD; for (var k = 0; k < NS; k++) { var sp = slotPos(k), d = dist(x, y, sp.x, sp.y); if (d < bd) { bd = d; best = k; } } return best; }
+function onUp(e){
+  if (e.pointerId !== S.ptr) return; e.preventDefault();
+  var d = S.drag; S.drag = null; S.ptr = null; try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+  if (!d) return; var p = ptXY(e);
+  if (d.kind === 'tray') {
+    S.tray[d.i].sc = 1.15;
+    if (!d.moved) { tapTray(d.i); return; }
+    if (S.phase === 'turn' || S.phase === 'turnback') return;
+    var j = nearestSlot(p.x, p.y, L.sd * 0.95);
+    if (j >= 0) { placeAt(j, d.tool); S.slots[j].sc = 1.4; }
+    else { var tp = L.trayPos[d.i]; flyer({ spr: toolSpr(d.tool, L.traySd), x0: p.x, y0: p.y, x1: tp.x, y1: tp.y, dur: 0.3 }); SFX.boop(); }
+  } else {
+    var sl = S.slots[d.from]; sl.sc = 1.2;
+    if (!sl.tool || S.phase === 'turn' || S.phase === 'turnback') return;
+    if (!d.moved) { useTool(sl.tool, d.from, true); sl.sc = 1.3; return; }
+    var j2 = nearestSlot(p.x, p.y, L.sd * 0.8);
+    if (j2 === d.from) { sl.sc = 1.3; SFX.place(); return; }
+    if (j2 >= 0) moveSlot(d.from, j2);
+    else peelSlot(d.from, p.x, p.y);
+  }
+}
+function onCancel(e){
+  if (e.pointerId !== S.ptr) return;
+  var d = S.drag; S.drag = null; S.ptr = null;
+  if (d && d.kind === 'tray') S.tray[d.i].sc = 1; else if (d) S.slots[d.from].sc = 1;
+}
+cv.addEventListener('pointerdown', onDown, { passive: false });
+cv.addEventListener('pointermove', onMove, { passive: false });
+cv.addEventListener('pointerup', onUp, { passive: false });
+cv.addEventListener('pointercancel', onCancel);
+cv.addEventListener('lostpointercapture', function(e){ if (e.pointerId === S.ptr && S.drag) onCancel(e); });
+['touchstart', 'touchmove', 'touchend', 'gesturestart', 'gesturechange', 'dblclick', 'contextmenu'].forEach(function(t){ document.addEventListener(t, function(e){ if (e.cancelable) e.preventDefault(); }, { passive: false }); });
+window.addEventListener('blur', function(){ if (S.drag) onCancel({ pointerId: S.ptr }); S.ptr = null; });
+
+// =====================================================================
+//  Update
+// =====================================================================
+function allPlates(){ var r = S.cook.slice(); S.guests.forEach(function(g){ if (g.plate && r.indexOf(g.plate) < 0) r.push(g.plate); }); if (S.center) r.push(S.center); S.returning.forEach(function(p){ if (r.indexOf(p) < 0) r.push(p); }); return r; }
+function spring(o, dt){ o.vs += (1 - o.sc) * 260 * dt; o.vs *= Math.pow(0.0009, dt); o.sc += o.vs * dt; }
+function update(dt){
+  S.T += dt;
+  var sdt = dt * S.speed;
+  if (S.startFx > 0) S.startFx = Math.max(0, S.startFx - dt * 0.7);
+  // phases
+  if (S.phase === 'turn') { S.turnT += dt; var tt = S.turnT / 2.4; S.rot = ease(tt) * TAU; S.seatV = ease(tt); if (tt >= 1) finishTurn(); }
+  else if (S.phase === 'turnback') { S.turnT += dt; var tb = S.turnT / 2.2; S.rot = -ease(tb) * TAU; S.seatV = 1 - ease(tb); if (tb >= 1) finishTurnBack(); }
+  else S.seatV = S.phase === 'dine' ? 1 : 0;
+  // record arm
+  if (S.started && (S.phase === 'cook' || S.phase === 'dine') && !S.view) {
+    var oh = S.head; S.head += sdt / SLOT_DUR;
+    var steps = Math.floor(S.head) - Math.floor(oh), guard = 0;
+    while (steps-- > 0 && guard++ < 8) { var n = Math.floor(oh) + 1; oh = n; if (n % NS === 0) lapEnd(); if (S.phase !== 'cook' && S.phase !== 'dine') break; onEnterSlot(n % NS); }
+    if (S.head >= NS * 1000) S.head -= NS * 1000;
+  }
+  if (S.pendingSwap) { S.pendingSwap.t -= sdt; if (S.pendingSwap.t <= 0) { var ps = S.pendingSwap; S.pendingSwap = null; if (S.phase === 'dine') doSwap(ps.a, ps.b); } }
+  S.beat = Math.max(0, S.beat - dt * 2.5); S.tableWob = Math.max(0, S.tableWob - dt * 1.5); S.flash = Math.max(0, S.flash - dt * 1.6);
+  S.basketPop = Math.max(0, S.basketPop - dt * 2); S.bowlPop = Math.max(0, S.bowlPop - dt * 2);
+  if (S.party) S.partyT += dt;
+  if (S.combo > 0 && S.T - S.lastTouchT > 1.2) S.combo = 0;
+  // stickers
+  S.slots.forEach(function(s){ spring(s, dt); s.hit = Math.max(0, s.hit - dt * 2.2); s.wob = Math.max(0, s.wob - dt * 2); if (s.arrive != null && s.arrive < 1) s.arrive = Math.min(1, s.arrive + dt / 0.16); });
+  S.tray.forEach(function(s){ spring(s, dt); s.wob = Math.max(0, s.wob - dt * 2); });
+  // plates
+  var ps2 = allPlates();
+  ps2.forEach(function(p){
+    var tgt = null;
+    if (p.ret) { tgt = stackPos(); p.retT = (p.retT || 0) + dt; }
+    else if (S.cook.indexOf(p) >= 0 && (S.phase === 'cook' || (S.phase === 'turn' && S.turnT < 1.2))) tgt = cookPos(S.cook.indexOf(p));
+    else if (p === S.center) tgt = centerPos();
+    else { for (var k = 0; k < 3; k++) if (S.guests[k].plate === p) tgt = gPlatePos(k); }
+    if (S.phase === 'turn' && S.turnT >= 1.2 && !tgt && S.cook.indexOf(p) >= 0) tgt = cookPos(S.cook.indexOf(p));
+    if (tgt) { if (!p.placed) { p.x = tgt.x; p.y = tgt.y; p.placed = true; } var kf = (S.phase === 'turn' && S.turnT < 1.2) ? 1 : Math.min(1, dt * (p.ret ? 5 : 7)); p.x += (tgt.x - p.x) * kf; p.y += (tgt.y - p.y) * kf; }
+    p.morph = Math.min(1, p.morph + dt * 3); p.wob = Math.max(0, p.wob - dt * 2); p.glow = Math.max(0, p.glow - dt * 0.8); p.pop = Math.max(0, p.pop - dt * 2.5);
+    if (p.fly) { p.fly.t += dt / 0.26; if (p.fly.t >= 1) p.fly = null; }
+  });
+  for (var r = S.returning.length - 1; r >= 0; r--) { var rp = S.returning[r], st = stackPos(); if (rp.retT > 0.5 && dist(rp.x, rp.y, st.x, st.y) < 4) { S.returning.splice(r, 1); S.used++; SFX.clink(); S.basket = 5; S.basketPop = 1; if (S.phase === 'dine') { S.bowlPop = 1; tryDeliver(); if (S.emptied >= 5 && !S.party) startParty(); } } }
+  if (S.phase === 'dine') tryDeliver();
+  // guests
+  S.guests.forEach(function(g){ updGuest(g, dt); });
+  // particles
+  for (var i = S.parts.length - 1; i >= 0; i--) { var p = S.parts[i]; p.life -= dt; if (p.life <= 0) { S.parts.splice(i, 1); continue; } p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; if (p.t === 'steam') { p.vx *= 0.98; p.s += dt * 6; } }
+  for (i = S.flyers.length - 1; i >= 0; i--) { var f = S.flyers[i]; f.t += dt / f.dur; if (f.t >= 1) { S.flyers.splice(i, 1); if (f.onLand) f.onLand(); } }
+  for (i = S.trails.length - 1; i >= 0; i--) { S.trails[i].life -= dt / 7; if (S.trails[i].life <= 0) S.trails.splice(i, 1); }
+  // invite + idle demo
+  S.inviteT -= dt; if (S.inviteT <= 0) { S.invite = computeInvite(); S.inviteT = 0.25; }
+  if (!S.drag) S.idle += dt;
+  if (S.idle > 4 && !S.demoShown && !S.demo && S.invite) startDemo();
+  if (S.demo) { S.demo.t += dt / 2.4; if (S.demo.t >= 1) S.demo = null; }
+  if (S.view) S.view.t = Math.min(1, S.view.t + dt * 4);
+}
+function updGuest(g, dt){
+  g.blink -= dt; if (g.blink < 0) { g.blinkT = 0.14; g.blink = rnd(2.2, 4.5); } g.blinkT = Math.max(0, g.blinkT - dt);
+  g.eatT = Math.max(0, g.eatT - dt); g.happy = Math.max(0, g.happy - dt * 0.6); g.cheer = Math.max(0, g.cheer - dt * 0.7); g.giggle = Math.max(0, g.giggle - dt * 1.5);
+  g.cup.sip = Math.max(0, (g.cup.sip || 0) - dt * 1.5); g.cup.pop = Math.max(0, (g.cup.pop || 0) - dt * 2);
+  if (g.reach) { g.reach.t += dt / g.reach.dur; if (g.reach.t >= 1) g.reach = null; }
+  if (g.lookAt) { g.lookAt.t -= dt; if (g.lookAt.t <= 0) g.lookAt = null; }
+  // order by gaze & hand: waiting guest points at the tool it wants
+  if (S.phase === 'dine' && !g.plate && g.desire) { g.pointT -= dt; if (g.pointT <= 0 && !g.reach) { g.pointT = 3.2; var ti = TOOLS.indexOf(FAM_TOOL[g.desire]), tp = L.trayPos[ti], hp = headPos(g.i);
+    var tx = lerp(hp.x, tp.x, 0.35), ty = lerp(hp.y, tp.y, 0.35); g.reach = { x: tx, y: ty, t: 0, dur: 1.4, point: true }; g.lookAt = { x: tp.x, y: tp.y, t: 1.6 }; } }
+  var tgt;
+  if (g.reach) tgt = { x: g.reach.x, y: g.reach.y };
+  else if (g.lookAt) tgt = g.lookAt;
+  else if (S.invite) tgt = invitePos(S.invite);
+  else tgt = armTip();
+  var hp2 = headPos(g.i), dx = tgt.x - hp2.x, dy = tgt.y - hp2.y, dl = Math.sqrt(dx * dx + dy * dy) || 1;
+  g.lx = lerp(g.lx, dx / dl, Math.min(1, dt * 8)); g.ly = lerp(g.ly, dy / dl, Math.min(1, dt * 8));
+}
+function armTip(){ var a = -Math.PI / 2 + (S.head % NS) * TAU / NS; return { x: L.cx + Math.cos(a) * L.R * 0.98, y: L.cy + Math.sin(a) * L.R * 0.98 }; }
+
+// =====================================================================
+//  Draw
+// =====================================================================
+function draw(noUI){
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.drawImage(BG, 0, 0, W, H);
+  drawGallery(noUI);
+  // table
+  var tw = S.tableWob * Math.sin(S.T * 30) * 2;
+  ctx.save(); ctx.translate(L.cx + tw, L.cy); ctx.rotate(S.rot); ctx.drawImage(TABLE, -TABLE.D / 2, -TABLE.D / 2, TABLE.D, TABLE.D); ctx.restore();
+  drawArmGlow();
+  // slots
+  for (var i = 0; i < NS; i++) { var s = S.slots[i], p = slotPos(i);
+    if (!s.tool) { if (s.rest) dspr(restSpr(L.sd), p.x, p.y, 1 + s.wob * 0.08 + (S.restNow && headSlot() === i ? S.beat * 0.12 : 0), Math.sin(S.T * 20) * s.wob * 0.1); else dspr(blankSpr(L.sd), p.x, p.y, 1 + s.wob * 0.1); } }
+  drawTrails();
+  // ingredients
+  drawIngredients();
+  // plates
+  drawStack();
+  allPlates().forEach(drawPlate);
+  // stickers on ring
+  for (i = 0; i < NS; i++) { var sl = S.slots[i]; if (!sl.tool) continue; if (S.drag && S.drag.kind === 'slot' && S.drag.from === i && S.drag.moved) { var pp = slotPos(i); ctx.save(); ctx.globalAlpha = 0.35; dspr(restSpr(L.sd), pp.x, pp.y, 1); ctx.restore(); continue; } drawRingSticker(i); }
+  drawArm();
+  // guests
+  for (i = 0; i < 3; i++) drawGuest(S.guests[i]);
+  // tray
+  for (i = 0; i < 4; i++) drawTraySticker(i);
+  // flyers
+  S.flyers.forEach(function(f){ var t = ease(f.t), x = lerp(f.x0, f.x1, t), y = lerp(f.y0, f.y1, t) - Math.sin(t * Math.PI) * L.R * f.arc; dspr(f.spr, x, y, lerp(f.s0, f.s1, t), f.rot * Math.sin(t * Math.PI)); });
+  drawParts();
+  if (!noUI) {
+    if (S.party) drawFrameInvite();
+    if (S.drag && S.drag.moved) drawDragged();
+    if (S.demo) drawDemo();
+    if (S.view) drawView();
+    if (S.flash > 0) { ctx.fillStyle = 'rgba(255,250,235,' + (S.flash * 0.8).toFixed(3) + ')'; ctx.fillRect(0, 0, W, H); }
+  }
+}
+function drawArmGlow(){
+  if (S.phase === 'turn' || S.phase === 'turnback') return;
+  var a = -Math.PI / 2 + (S.head % NS) * TAU / NS, R = L.R, on = S.started ? 1 : 0.35;
+  var quiet = S.restNow ? 1 : 0;
+  ctx.save(); ctx.lineCap = 'round';
+  for (var k = 0; k < 5; k++) { ctx.strokeStyle = quiet ? 'rgba(170,200,255,' + (0.18 - k * 0.03) * on + ')' : 'rgba(255,200,60,' + (0.22 - k * 0.04) * on + ')';
+    ctx.lineWidth = R * 0.33; ctx.beginPath(); ctx.arc(L.cx, L.cy, L.ringR, a - (k + 1) * 0.09, a - k * 0.09); ctx.stroke(); }
+  if (S.startFx > 0) { ctx.strokeStyle = 'rgba(255,220,90,' + (S.startFx * 0.7).toFixed(3) + ')'; ctx.lineWidth = R * 0.06 * (1 + (1 - S.startFx) * 2); ctx.beginPath(); ctx.arc(L.cx, L.cy, R * (0.98 + (1 - S.startFx) * 0.15), 0, TAU); ctx.stroke(); }
+  ctx.restore();
+}
+function drawArm(){
+  if (S.phase === 'turn' || S.phase === 'turnback') return;
+  var a = -Math.PI / 2 + (S.head % NS) * TAU / NS, R = L.R, c = Math.cos(a), s = Math.sin(a), on = S.started ? 1 : 0.45;
+  var quiet = S.restNow;
+  var x0 = L.cx + c * R * 0.6, y0 = L.cy + s * R * 0.6, x1 = L.cx + c * R * 1.03, y1 = L.cy + s * R * 1.03;
+  var w = R * (0.06 + S.beat * 0.025);
+  ctx.save(); ctx.lineCap = 'round'; ctx.globalAlpha = on;
+  ctx.strokeStyle = C.ink; ctx.lineWidth = w + 5; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.strokeStyle = quiet ? '#bcd4ff' : C.orange; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.strokeStyle = quiet ? '#ffffff' : C.yellow; ctx.lineWidth = w * 0.45; ctx.beginPath(); ctx.moveTo(x0 + c * 3, y0 + s * 3); ctx.lineTo(x1 - c * 3, y1 - s * 3); ctx.stroke();
+  ctx.fillStyle = quiet ? '#bcd4ff' : C.red; ctx.strokeStyle = C.ink; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x1, y1, w * 0.85, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function drawRingSticker(i){
+  var s = S.slots[i], p = slotPos(i), inv = S.invite, isInv = inv && inv.t === 'slot' && inv.i === i;
+  var x = p.x, y = p.y;
+  if (s.arrive != null && s.arrive < 1 && s.fromX != null) { var t = easeOut(s.arrive); x = lerp(s.fromX, p.x, t); y = lerp(s.fromY, p.y, t) - Math.sin(t * Math.PI) * L.R * 0.15; }
+  var bob = isInv ? -Math.abs(Math.sin(S.T * 4.5)) * L.sd * 0.1 : 0;
+  var sc = s.sc * (1 + s.hit * 0.14), rot = Math.sin(S.T * 22) * s.wob * 0.12 + (isInv ? Math.sin(S.T * 4.5) * 0.06 : 0);
+  // shadow
+  ctx.save(); ctx.globalAlpha = 0.18; ctx.fillStyle = C.ink; ctx.beginPath(); ctx.ellipse(x + 3, y + 5, L.sd * 0.46 * sc, L.sd * 0.42 * sc, 0, 0, TAU); ctx.fill(); ctx.restore();
+  if (isInv) glowRing(x, y + bob, L.sd * 0.58);
+  if (s.hit > 0) { ctx.save(); ctx.globalAlpha = s.hit * 0.6; ctx.strokeStyle = TCOL[s.tool]; ctx.lineWidth = L.sd * 0.1; ctx.beginPath(); ctx.arc(x, y, L.sd * (0.5 + (1 - s.hit) * 0.25), 0, TAU); ctx.stroke(); ctx.restore(); }
+  dspr(toolSpr(s.tool, L.sd), x, y + bob, sc, rot);
+  if (isInv && inv.mode === 'peel') drawCurl(x, y + bob, L.sd * sc, rot);
+}
+function drawCurl(x, y, D, rot){
+  var lift = 0.5 + 0.5 * Math.abs(Math.sin(S.T * 4.5));
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot - 0.6);
+  var r = D * 0.47, k = D * 0.2 * lift;
+  ctx.fillStyle = '#e9e1cb'; ctx.strokeStyle = '#a99f86'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(r - k * 0.2, -k); ctx.lineTo(r + k * 0.5, -k * 1.4); ctx.lineTo(r - k * 0.6, -k * 2.2); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function glowRing(x, y, r){
+  var a = 0.45 + 0.35 * Math.sin(S.T * 5);
+  ctx.save(); ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(255,214,58,' + a.toFixed(3) + ')'; ctx.lineWidth = r * 0.22; ctx.beginPath(); ctx.arc(x, y, r * (1.02 + 0.05 * Math.sin(S.T * 5)), 0, TAU); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,' + (a * 0.6).toFixed(3) + ')'; ctx.lineWidth = r * 0.06; ctx.beginPath(); ctx.arc(x, y, r * 1.18, 0, TAU); ctx.stroke();
+  ctx.restore();
+}
+function drawTraySticker(i){
+  var s = S.tray[i], p = L.trayPos[i], inv = S.invite, isInv = inv && inv.t === 'tray' && inv.i === i;
+  if (S.drag && S.drag.kind === 'tray' && S.drag.i === i && S.drag.moved) { ctx.save(); ctx.globalAlpha = 0.4; dspr(toolSpr(TOOLS[i], L.traySd), p.x, p.y, 0.9); ctx.restore(); return; }
+  var bob = isInv ? -Math.abs(Math.sin(S.T * 4.5)) * L.traySd * 0.16 : 0;
+  var sq = isInv ? 1 + 0.06 * Math.sin(S.T * 9) : 1;
+  ctx.save(); ctx.globalAlpha = 0.2; ctx.fillStyle = C.ink; ctx.beginPath(); ctx.ellipse(p.x + 3, p.y + 6, L.traySd * 0.45, L.traySd * 0.4, 0, 0, TAU); ctx.fill(); ctx.restore();
+  if (isInv) glowRing(p.x, p.y + bob, L.traySd * 0.6);
+  dspr(toolSpr(TOOLS[i], L.traySd), p.x, p.y + bob, s.sc, Math.sin(S.T * 25) * s.wob * 0.15, null, 1 / sq, sq);
+}
+function drawDragged(){
+  var d = S.drag, D = d.kind === 'tray' ? lerp(L.traySd, L.sd, 0.6) : L.sd;
+  var v = Math.sqrt(d.vx * d.vx + d.vy * d.vy), st = Math.min(0.38, v / 2400), a = Math.atan2(d.vy, d.vx);
+  var near = nearestSlot(d.x, d.y, d.kind === 'tray' ? L.sd * 0.95 : L.sd * 0.8);
+  if (near >= 0) { var np = slotPos(near); ctx.save(); ctx.globalAlpha = 0.5 + 0.3 * Math.sin(S.T * 10); ctx.strokeStyle = TCOL[d.tool]; ctx.lineWidth = 5; ctx.setLineDash([8, 8]); ctx.beginPath(); ctx.arc(np.x, np.y, L.sd * 0.52, 0, TAU); ctx.stroke(); ctx.restore(); }
+  ctx.save(); ctx.translate(d.x, d.y); ctx.rotate(a); ctx.scale(1 + st, 1 - st * 0.5); ctx.rotate(-a);
+  ctx.globalAlpha = 0.25; ctx.fillStyle = C.ink; ctx.beginPath(); ctx.ellipse(6, 12, D * 0.48, D * 0.42, 0, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+  var sp = toolSpr(d.tool, D); ctx.drawImage(sp.c, -D / 2, -D / 2 - 6, D * 1.08, D * 1.08); ctx.restore();
+}
+function drawTrails(){
+  if (!S.trails.length) return;
+  ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (var i = 1; i < S.trails.length; i++) { var a = S.trails[i - 1], b = S.trails[i]; if (b.brk || dist(a.x, a.y, b.x, b.y) > L.R * 0.6) continue;
+    ctx.strokeStyle = b.col; ctx.globalAlpha = Math.min(0.26, b.life * 0.3); ctx.lineWidth = L.sd * 0.32 * b.w; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.globalAlpha = Math.min(0.5, b.life * 0.5); ctx.lineWidth = L.sd * 0.06; ctx.beginPath(); ctx.moveTo(a.x + 4, a.y - 3); ctx.lineTo(b.x + 4, b.y - 3); ctx.stroke(); }
+  ctx.restore();
+}
+function drawPlate(p){
+  var D = L.plateD * (p === S.center ? 0.84 : 1), pop = p.pop > 0 ? (1 - easeOut(1 - p.pop) * 0) : 0;
+  var sc = (p.pop > 0 ? 1 - p.pop * 0.6 : 1) * (1 + Math.sin(S.T * 25) * p.wob * 0.04), x = p.x, y = p.y;
+  if (p.ret) { ctx.save(); ctx.globalAlpha = clamp(1 - (p.retT - 0.3), 0.3, 1); }
+  ctx.save(); ctx.globalAlpha *= 0.2; ctx.fillStyle = C.ink; ctx.beginPath(); ctx.ellipse(x + 2, y + D * 0.08, D * 0.5 * sc, D * 0.42 * sc, 0, 0, TAU); ctx.fill(); ctx.restore();
+  var isActive = p === cookingPlate() && S.started;
+  if (isActive) { ctx.save(); ctx.globalAlpha = 0.25 + S.beat * 0.25; ctx.fillStyle = C.yellow; ctx.beginPath(); ctx.arc(x, y, D * 0.62, 0, TAU); ctx.fill(); ctx.restore(); }
+  if (p.glow > 0) { ctx.save(); ctx.globalAlpha = p.glow * 0.6; ctx.strokeStyle = '#fff6b0'; ctx.lineWidth = D * 0.12; ctx.beginPath(); ctx.arc(x, y, D * (0.6 + (1 - p.glow) * 0.3), 0, TAU); ctx.stroke(); ctx.restore(); }
+  dspr(plateSpr(D), x, y, sc);
+  if (p.food) {
+    var fx = x, fy = y - D * 0.04, fs = 1.0 * sc;
+    if (p.fly) { var t = easeOut(p.fly.t); fx = lerp(p.fly.x, x, t); fy = lerp(p.fly.y, fy, t) - Math.sin(t * Math.PI) * L.R * 0.25; fs *= lerp(0.5, 1, t); }
+    var sp = foodSpr(p.food, D);
+    var am = p.amount;
+    if (p.prev && p.morph < 1 && !p.fly) { dspr(foodSpr(p.prev, D), fx, fy, fs, 0, 1 - p.morph); dspr(sp, fx, fy, fs * (0.85 + 0.15 * easeOut(p.morph) + Math.sin(p.morph * Math.PI) * 0.12), 0, p.morph); }
+    else if (am < 0.999) {
+      ctx.save(); ctx.translate(fx, fy); ctx.beginPath(); ctx.moveTo(0, 0); var a0 = -Math.PI / 2 + (1 - am) * TAU;
+      ctx.arc(0, 0, D * 0.6, a0, -Math.PI / 2 + TAU); ctx.closePath(); ctx.clip(); ctx.drawImage(sp.c, -sp.w / 2 * fs, -sp.h / 2 * fs, sp.w * fs, sp.h * fs); ctx.restore();
+      ctx.save(); ctx.fillStyle = foodCols(p.food)[0]; for (var k = 0; k < 3; k++) { var aa = a0 + 0.3 + k * 0.5; dot(ctx, fx + Math.cos(aa) * D * 0.18, fy + Math.sin(aa) * D * 0.18, D * 0.03, foodCols(p.food)[k % 2], 0.8); } ctx.restore();
+    } else dspr(sp, fx, fy, fs * (1 + Math.sin(S.T * 18) * p.wob * 0.05));
+    if (S.hold && p === cookingPlate() && Math.random() < 0.15) steam(x + rnd(-D * 0.2, D * 0.2), y - D * 0.2, 1);
+  }
+  if (p.ret) ctx.restore();
+}
+function drawStack(){
+  if (!S.used || S.phase === 'cook') return; var st = stackPos(), D = L.plateD * 0.62;
+  for (var k = 0; k < Math.min(5, S.used); k++) dspr(plateSpr(L.plateD), st.x + (k % 2 ? 2 : -2), st.y - k * D * 0.1, 0.62);
+}
+function drawIngredients(){
+  var b = L.basket, s = L.ingSz, bp = 1 + S.basketPop * 0.12 * Math.sin(S.basketPop * 12);
+  dspr(basketSpr(s), b.x, b.y, bp);
+  var bs = spr('rawb_' + Math.round(s * 0.36), s * 0.36, s * 0.36, function(g){ paintFood(g, { k: 'raw' }); });
+  var n = Math.max(1, Math.min(5, S.basket)), pos = [[-0.22, -0.02], [0.2, -0.04], [0, -0.14], [-0.1, 0.06], [0.12, 0.08]];
+  for (var k = 0; k < n; k++) dspr(bs, b.x + pos[k][0] * s, b.y + pos[k][1] * s - s * 0.05, bp, (k - 2) * 0.2);
+  var w = L.bowl, wp = 1 + S.bowlPop * 0.12 * Math.sin(S.bowlPop * 12); dspr(bowlSpr(s * 0.9), w.x, w.y, wp);
+}
+function drawGuest(g){
+  var hp = headPos(g.i), r = L.hr, a = hp.a, st = GST[g.i];
+  var inward = a + Math.PI, ix = Math.cos(inward), iy = Math.sin(inward), px = -iy, py = ix;
+  var bob = Math.sin(S.T * 6 + g.i) * 1.2 + S.beat * r * 0.06 + g.cheer * Math.abs(Math.sin(S.T * 9)) * r * 0.25 + g.giggle * Math.sin(S.T * 30) * r * 0.06;
+  var hx = hp.x, hy = hp.y - bob;
+  // torso
+  var tx = hx + ix * r * 1.05, ty = hy + iy * r * 1.05;
+  dspr(torsoSpr(g.i, r * 2.3), tx, ty, 1, inward - Math.PI / 2 + Math.PI);
+  // arms
+  var sh1 = { x: tx + px * r * 0.8 + ix * r * 0.1, y: ty + py * r * 0.8 + iy * r * 0.1 }, sh2 = { x: tx - px * r * 0.8 + ix * r * 0.1, y: ty - py * r * 0.8 + iy * r * 0.1 };
+  var rest1 = { x: sh1.x + ix * r * 1.0 + px * r * 0.15, y: sh1.y + iy * r * 1.0 + py * r * 0.15 }, rest2 = { x: sh2.x + ix * r * 1.0 - px * r * 0.15, y: sh2.y + iy * r * 1.0 - py * r * 0.15 };
+  if (g.cheer > 0.3) { rest1 = { x: sh1.x + px * r * 0.9, y: sh1.y - r * 1.3 }; rest2 = { x: sh2.x - px * r * 0.9, y: sh2.y - r * 1.3 }; }
+  var h1 = rest1;
+  if (g.reach) { var t = g.reach.t, k = t < 0.3 ? easeOut(t / 0.3) : (t > 0.7 ? 1 - ease((t - 0.7) / 0.3) : 1); if (g.reach.point) k *= 0.85; h1 = { x: lerp(rest1.x, g.reach.x, k), y: lerp(rest1.y, g.reach.y, k) }; }
+  // cup held by second hand position
+  var cpos = cupPos(g.i);
+  drawLimb(sh2, rest2, st, r); drawLimb(sh1, h1, st, r);
+  if (g.reach && !g.reach.point && g.reach.t > 0.25 && g.reach.t < 0.75) { ctx.save(); ctx.strokeStyle = '#b9c6d8'; ctx.lineWidth = r * 0.12; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(h1.x, h1.y); ctx.lineTo(h1.x + ix * r * 0.4, h1.y + iy * r * 0.4); ctx.stroke(); ctx.restore(); }
+  // head
+  var hs = r * 2.25; dspr(headSpr(g.i, hs), hx, hy, 1 + g.happy * 0.03);
+  // eyes
+  var ex = r * 0.34, ey = -r * 0.0 + r * 0.05, lx = g.lx * r * 0.09, ly = g.ly * r * 0.08;
+  ctx.save(); ctx.lineWidth = Math.max(2, r * 0.07); ctx.strokeStyle = C.ink; ctx.lineCap = 'round';
+  [-1, 1].forEach(function(sd){
+    var cx = hx + sd * ex, cy = hy + ey;
+    if (g.blinkT > 0 || g.happy > 1.2) { ctx.beginPath(); if (g.happy > 1.2) ctx.arc(cx, cy + r * 0.04, r * 0.13, Math.PI * 1.1, Math.PI * 1.9); else { ctx.moveTo(cx - r * 0.13, cy); ctx.lineTo(cx + r * 0.13, cy); } ctx.stroke(); }
+    else { ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.ellipse(cx, cy, r * 0.17, r * 0.2, 0, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = C.ink; ctx.beginPath(); ctx.arc(cx + lx, cy + ly, r * 0.1, 0, TAU); ctx.fill(); ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(cx + lx - r * 0.03, cy + ly - r * 0.04, r * 0.035, 0, TAU); ctx.fill(); }
+  });
+  if (g.i === 1) { ctx.lineWidth = Math.max(1.5, r * 0.05); ctx.strokeStyle = '#6a5a4a'; [-1, 1].forEach(function(sd){ ctx.beginPath(); ctx.arc(hx + sd * ex, hy + ey, r * 0.25, 0, TAU); ctx.stroke(); }); ctx.beginPath(); ctx.moveTo(hx - ex + r * 0.25, hy + ey); ctx.lineTo(hx + ex - r * 0.25, hy + ey); ctx.stroke(); }
+  // mouth
+  var my = hy + r * 0.45; ctx.lineWidth = Math.max(2, r * 0.08); ctx.strokeStyle = C.ink;
+  if (g.eatT > 0) { var ch = Math.abs(Math.sin(g.eatT * 14)); ctx.fillStyle = '#9a2a2a'; ctx.beginPath(); ctx.ellipse(hx, my, r * 0.17, r * (0.05 + ch * 0.12), 0, 0, TAU); ctx.fill(); ctx.stroke(); }
+  else if (g.happy > 0.5 || g.cheer > 0) { ctx.fillStyle = '#9a2a2a'; ctx.beginPath(); ctx.arc(hx, my - r * 0.05, r * 0.2, 0.1, Math.PI - 0.1); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+  else if (!g.plate && S.phase === 'dine') { ctx.beginPath(); ctx.arc(hx, my, r * 0.08, 0, TAU); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.arc(hx, my - r * 0.1, r * 0.15, 0.3, Math.PI - 0.3); ctx.stroke(); }
+  if (g.i === 1) { ctx.fillStyle = '#e8e4dc'; ctx.beginPath(); ctx.ellipse(hx - r * 0.14, my - r * 0.17, r * 0.15, r * 0.06, 0.2, 0, TAU); ctx.ellipse(hx + r * 0.14, my - r * 0.17, r * 0.15, r * 0.06, -0.2, 0, TAU); ctx.fill(); ctx.lineWidth = 1.5; ctx.stroke(); }
+  ctx.restore();
+  // cup
+  drawCup(g, cpos);
+  // desire bubble
+  if (g.desire && (S.phase === 'dine' ? !g.plate : S.phase === 'cook')) drawBubble(g);
+}
+function drawLimb(a, b, st, r){
+  ctx.save(); ctx.lineCap = 'round';
+  ctx.strokeStyle = C.ink; ctx.lineWidth = r * 0.42; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.strokeStyle = st.shirt; ctx.lineWidth = r * 0.3; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.fillStyle = st.skin; ctx.lineWidth = Math.max(2, r * 0.07); ctx.strokeStyle = C.ink; ctx.beginPath(); ctx.arc(b.x, b.y, r * 0.22, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function drawCup(g, c){
+  var D = L.hr * 1.2, s = 1 + (g.cup.pop || 0) * 0.15 + (g.cup.sip || 0) * 0.08;
+  dspr(cupSpr(D), c.x, c.y, s);
+  if (g.cup.fill > 0.02) { ctx.save(); ctx.globalAlpha = 0.9; ctx.fillStyle = g.cup.tint; ctx.beginPath(); ctx.ellipse(c.x - D * 0.06, c.y - D * 0.22 + (1 - g.cup.fill) * D * 0.3, D * 0.26 * s, D * 0.07 * s, 0, 0, TAU); ctx.fill(); ctx.restore();
+    if (g.cup.tint && Math.random() < 0.03) steam(c.x, c.y - D * 0.35, 1); }
+}
+function drawBubble(g){
+  var b = bubblePos(g.i), r = L.hr * 0.85, hp = headPos(g.i), pulse = 1 + Math.sin(S.T * 3 + g.i) * 0.04;
+  ctx.save(); ctx.globalAlpha = S.phase === 'cook' ? 0.75 : 1;
+  ctx.fillStyle = '#fffdf4'; ctx.strokeStyle = C.ink; ctx.lineWidth = 3;
+  dot(ctx, lerp(hp.x, b.x, 0.45), lerp(hp.y, b.y, 0.45), r * 0.12, '#fffdf4', ctx.globalAlpha); dot(ctx, lerp(hp.x, b.x, 0.65), lerp(hp.y, b.y, 0.65), r * 0.18, '#fffdf4', ctx.globalAlpha);
+  ctx.beginPath(); ctx.arc(b.x, b.y, r * pulse, 0, TAU); ctx.fill(); ctx.stroke();
+  dspr(foodSpr(FAM_FOOD[g.desire], r * 1.7), b.x, b.y, pulse);
+  ctx.restore();
+}
+function drawParts(){
+  ctx.save();
+  for (var i = 0; i < S.parts.length; i++) { var p = S.parts[i], a = clamp(p.life / p.max, 0, 1); ctx.globalAlpha = p.t === 'steam' ? a * 0.45 : a; ctx.fillStyle = p.col;
+    if (p.t === 'spark') { ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot + S.T * 4); ctx.fillRect(-p.s, -p.s * 0.3, p.s * 2, p.s * 0.6); ctx.fillRect(-p.s * 0.3, -p.s, p.s * 0.6, p.s * 2); ctx.restore(); }
+    else if (p.t === 'confetti' || p.t === 'chip') { ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot + p.life * 5); ctx.fillRect(-p.s, -p.s * 0.5, p.s * 2, p.s); ctx.restore(); }
+    else { ctx.beginPath(); ctx.ellipse(p.x, p.y, p.s, p.s * 0.75, p.rot, 0, TAU); ctx.fill(); } }
+  ctx.restore();
+}
+function drawGallery(noUI){
+  var g = L.gal, n = Math.min(3, S.pics.length);
+  for (var k = 0; k < n; k++) { var pic = S.pics[S.pics.length - 1 - k]; if (!pic.ok) continue; var x = g.x + g.s * (0.5 + k * 1.12), y = g.y + g.s * 0.5, s = g.s;
+    var ar = pic.img.height / pic.img.width || 1, w = s, h = s * ar; if (h > s * 1.2) { h = s * 1.2; w = h / ar; }
+    ctx.save(); ctx.translate(x, y); ctx.rotate((k - 1) * 0.06); ctx.fillStyle = '#ffb52a'; ctx.strokeStyle = C.ink; ctx.lineWidth = 3; ctx.fillRect(-w / 2 - 5, -h / 2 - 5, w + 10, h + 10); ctx.strokeRect(-w / 2 - 5, -h / 2 - 5, w + 10, h + 10);
+    ctx.drawImage(pic.img, -w / 2, -h / 2, w, h); ctx.restore(); }
+}
+function drawFrameInvite(){
+  var f = framePos(), bob = -Math.abs(Math.sin(S.T * 4.5)) * f.s * 0.12, intro = clamp(S.partyT * 2, 0, 1);
+  glowRing(f.x, f.y + bob, f.s * 0.62);
+  dspr(frameSpr(f.s), f.x, f.y + bob, easeOut(intro) * (1 + 0.04 * Math.sin(S.T * 9)), Math.sin(S.T * 3) * 0.08);
+}
+function drawDemo(){
+  var d = S.demo, t = d.t, hD = L.R * 0.42, x, y, press = 0, ghost = null;
+  var f = d.from, to = d.to || d.from;
+  if (t < 0.22) { var k = easeOut(t / 0.22); x = lerp(f.x + L.R * 0.5, f.x, k); y = lerp(f.y + L.R * 0.5, f.y, k); }
+  else if (t < 0.32) { x = f.x; y = f.y; press = (t - 0.22) / 0.1; }
+  else if (t < 0.75) { var k2 = ease((t - 0.32) / 0.43); press = 1; if (d.inv.t === 'tray' || d.inv.t === 'frame') { x = f.x; y = f.y; press = 1 - k2; ghost = d.inv.t === 'tray' && d.to ? { x: lerp(f.x, to.x, k2), y: lerp(f.y, to.y, k2) - Math.sin(k2 * Math.PI) * L.R * 0.2 } : null; }
+    else { x = lerp(f.x, to.x, k2); y = lerp(f.y, to.y, k2); ghost = { x: x, y: y }; } }
+  else { var k3 = (t - 0.75) / 0.25; x = (d.inv.t === 'slot' && d.inv.mode !== 'tap') ? to.x : f.x; y = (d.inv.t === 'slot' && d.inv.mode !== 'tap') ? to.y : f.y; x += k3 * L.R * 0.3; y += k3 * L.R * 0.3; ctx.save(); ctx.globalAlpha = 1 - k3; }
+  if (ghost && d.tool) { ctx.save(); ctx.globalAlpha = 0.55; dspr(toolSpr(d.tool, L.sd), ghost.x, ghost.y, 1); ctx.restore(); }
+  dspr(handSpr(hD), x + hD * 0.1, y + hD * 0.42, 1 - press * 0.12, -0.35);
+  if (press > 0 && press < 1) { ctx.save(); ctx.globalAlpha = 1 - press; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, L.R * 0.08 + press * L.R * 0.12, 0, TAU); ctx.stroke(); ctx.restore(); }
+  if (t >= 0.75) ctx.restore();
+}
+function drawView(){
+  var v = S.view, pic = v.pic; if (!pic || !pic.ok) { S.view = null; return; }
+  ctx.save(); ctx.fillStyle = 'rgba(12,16,40,' + (0.75 * v.t) + ')'; ctx.fillRect(0, 0, W, H);
+  var ar = pic.img.height / pic.img.width, w = Math.min(W * 0.86, H * 0.8 / ar), h = w * ar, s = 0.6 + 0.4 * easeOut(v.t);
+  ctx.translate(W / 2, H / 2); ctx.scale(s, s); ctx.rotate(-0.03);
+  ctx.fillStyle = '#ffb52a'; ctx.strokeStyle = C.ink; ctx.lineWidth = 5; ctx.fillRect(-w / 2 - 14, -h / 2 - 14, w + 28, h + 28); ctx.strokeRect(-w / 2 - 14, -h / 2 - 14, w + 28, h + 28);
+  ctx.drawImage(pic.img, -w / 2, -h / 2, w, h); ctx.restore();
+}
+
+// =====================================================================
+//  Loop / visibility / resize
+// =====================================================================
+var raf = 0, last = 0, needLayout = false;
+function loop(ts){
+  raf = 0; if (document.hidden) return;
+  if (needLayout) { needLayout = false; layout(); }
+  var dt = last ? Math.min(0.05, (ts - last) / 1000) : 0.016; last = ts;
+  update(dt); draw(false);
+  raf = requestAnimationFrame(loop);
+}
+function startLoop(){ if (!raf) { last = 0; raf = requestAnimationFrame(loop); } }
+document.addEventListener('visibilitychange', function(){
+  if (document.hidden) { if (raf) { cancelAnimationFrame(raf); raf = 0; } holdEnd(); if (S.drag) onCancel({ pointerId: S.ptr }); S.ptr = null; try { if (AC && AC.state === 'running') AC.suspend(); } catch (e) {} }
+  else { try { if (AC && AC.state === 'suspended') AC.resume(); } catch (e) {} startLoop(); }
+});
+window.addEventListener('pagehide', function(){ holdEnd(); });
+window.addEventListener('resize', function(){ needLayout = true; });
+window.addEventListener('orientationchange', function(){ needLayout = true; });
+
+// init
+layout();
+S.cook = [newPlate(), newPlate(), newPlate()];
+S.cook.forEach(function(p, i){ var q = cookPos(i); p.x = q.x; p.y = q.y; p.placed = true; });
+storeLoad();
+logEv('store', S.store);
+startLoop();
+
+// test/inspection hook (no network, read mostly)
+window.GF14 = { S: S, TOOLS: TOOLS, slotPos: slotPos, trayPos: function(i){ return L.trayPos[i]; }, headPos: headPos, framePos: framePos, L: L, simulateRing: simulateRing, applyTool: applyTool };
+})();
+</script>
+</body>
+</html>

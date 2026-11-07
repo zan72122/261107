@@ -1,0 +1,1726 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex,nofollow">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="format-detection" content="telephone=no">
+<title>ころん、ぱたぱた！おきがえ天気のしかけ劇場</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#6f879c;
+  touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  overscroll-behavior:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;left:0;top:0;display:block;touch-action:none;outline:none}
+#sa{position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;
+  padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);
+  padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left)}
+</style>
+
+<script src="../../gf-playlog.js" defer></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="sa"></div>
+<script>
+(() => {
+'use strict';
+/* ============================================================
+   固定4色（紙層はすべて単色・グラデーション/輪郭線なし）
+   ============================================================ */
+const COL = { bg:'#6f879c', ink:'#1e2840', red:'#d9533b', cream:'#f2e8cf' };
+const TAU = Math.PI * 2;
+const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+const lerp = (a,b,t) => a + (b-a)*t;
+const ease = t => t < .5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
+const easeOut = t => 1 - (1-t)*(1-t);
+const rnd = (a,b) => a + Math.random()*(b-a);
+const appr = (c,t,r,dt) => c + (t-c)*(1 - Math.exp(-r*dt));
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+const SA = { t:0, r:0, b:0, l:0 };
+const L = { bx:0, by:0, bs:1, tx:0, ty:0, ts:1, portrait:true };
+const BW = 640, BH = 560, TW = 640, TH = 600;
+let TIME = 0, DT = 0, SPEED = 1;
+
+/* ============================================================
+   描画プリミティブ（SH=true のとき影色で塗る）
+   ============================================================ */
+let SH = false, DEPTH = 1;
+function fc(c){ ctx.fillStyle = SH ? COL.ink : COL[c]; }
+function circ(x,y,r,c){ fc(c); ctx.beginPath(); ctx.arc(x,y,Math.max(0.1,r),0,TAU); ctx.fill(); }
+function ell(x,y,rx,ry,c,rot){ fc(c); ctx.beginPath(); ctx.ellipse(x,y,Math.max(.1,rx),Math.max(.1,ry),rot||0,0,TAU); ctx.fill(); }
+function rect(x,y,w,h,c){ fc(c); ctx.fillRect(x,y,w,h); }
+function poly(p,c){ fc(c); ctx.beginPath(); ctx.moveTo(p[0],p[1]); for(let i=2;i<p.length;i+=2) ctx.lineTo(p[i],p[i+1]); ctx.closePath(); ctx.fill(); }
+function rrPath(x,y,w,h,r){ r=Math.min(r,w/2,h/2); ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function rr(x,y,w,h,r,c){ fc(c); rrPath(x,y,w,h,r); ctx.fill(); }
+function halfDisc(x,y,rx,ry,c,up){ fc(c); ctx.beginPath(); ctx.ellipse(x,y,rx,ry,0,up?Math.PI:0,up?TAU:Math.PI); ctx.closePath(); ctx.fill(); }
+function thread(pts,w){ if(SH) return; ctx.strokeStyle = COL.ink; ctx.lineWidth = w||1.6; ctx.lineCap='round'; ctx.beginPath(); ctx.moveTo(pts[0],pts[1]); for(let i=2;i<pts.length;i+=2) ctx.lineTo(pts[i],pts[i+1]); ctx.stroke(); }
+function brad(x,y,r){ r=r||3; circ(x,y,r,'cream'); if(!SH) circ(x,y,r*.45,'ink'); }
+function sh(fn,d){ if(SH){ fn(); return; } d=(d||1)*DEPTH; ctx.save(); ctx.translate(2.6*d,3.4*d); SH=true; try{ fn(); } finally { SH=false; ctx.restore(); } fn(); }
+function star5(x,y,r,c,rot){ const p=[]; for(let i=0;i<10;i++){ const a=rot-Math.PI/2+i*Math.PI/5; const rr2=i%2?r*.45:r; p.push(x+Math.cos(a)*rr2,y+Math.sin(a)*rr2);} poly(p,c); }
+function zigBand(x0,x1,yTop,yBot,amp,step,phase,c){ const p=[]; p.push(x0,yBot); let k=0; for(let x=x0;x<=x1+0.01;x+=step){ p.push(x, yTop + ((k++ + phase)%2 ? amp : 0)); } p.push(x1,yTop, x1,yBot); poly(p,c); }
+
+function setScreen(){ ctx.setTransform(DPR,0,0,DPR,0,0); }
+function setB(){ ctx.setTransform(DPR*L.bs,0,0,DPR*L.bs,DPR*L.bx,DPR*L.by); }
+function setT(){ ctx.setTransform(DPR*L.ts,0,0,DPR*L.ts,DPR*L.tx,DPR*L.ty); }
+const bToS = (x,y) => [L.bx + x*L.bs, L.by + y*L.bs];
+const tToS = (x,y) => [L.tx + x*L.ts, L.ty + y*L.ts];
+const sToB = (x,y) => [(x-L.bx)/L.bs, (y-L.by)/L.bs];
+const sToT = (x,y) => [(x-L.tx)/L.ts, (y-L.ty)/L.ts];
+
+/* ============================================================
+   レイアウト
+   ============================================================ */
+const saEl = document.getElementById('sa');
+function resize(){
+  const vv = window.visualViewport;
+  W = Math.round(vv ? vv.width : window.innerWidth) || window.innerWidth || 390;
+  H = Math.round(vv ? vv.height : window.innerHeight) || window.innerHeight || 844;
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  cv.style.width = W+'px'; cv.style.height = H+'px';
+  try{ const cs = getComputedStyle(saEl);
+    SA.t = parseFloat(cs.paddingTop)||0; SA.r = parseFloat(cs.paddingRight)||0;
+    SA.b = parseFloat(cs.paddingBottom)||0; SA.l = parseFloat(cs.paddingLeft)||0; }catch(e){}
+  const m = 6;
+  const sx = SA.l + m, sy = SA.t + m, sw = W - SA.l - SA.r - 2*m, shh = H - SA.t - SA.b - 2*m;
+  if (sw/shh < 1.08){
+    L.portrait = true;
+    const s = Math.min(sw/TW, shh/(TH+BH));
+    const tot = (TH+BH)*s, g = (shh - tot)/3;
+    L.ts = L.bs = s;
+    L.tx = L.bx = sx + (sw - TW*s)/2;
+    L.ty = sy + g; L.by = L.ty + TH*s + g;
+  } else {
+    L.portrait = false;
+    const bw = sw*0.46, tw = sw - bw;
+    L.bs = Math.min(bw/BW, shh/BH); L.ts = Math.min(tw/TW, shh/TH);
+    L.bx = sx + (bw - BW*L.bs)/2; L.by = sy + (shh - BH*L.bs)/2;
+    L.tx = sx + bw + (tw - TW*L.ts)/2; L.ty = sy + (shh - TH*L.ts)/2;
+  }
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
+
+/* ============================================================
+   音（Web Audio 合成・最初のタッチで開始）
+   ============================================================ */
+let AC = null, MASTER = null, NOISE = null, audioOK = false;
+function initAudio(){
+  if (AC) { if (AC.state === 'suspended') AC.resume().catch(()=>{}); return; }
+  try{
+    const A = window.AudioContext || window.webkitAudioContext;
+    if (!A) return;
+    AC = new A();
+    MASTER = AC.createGain(); MASTER.gain.value = 0.55; MASTER.connect(AC.destination);
+    const n = AC.sampleRate * 1.0; NOISE = AC.createBuffer(1, n, AC.sampleRate);
+    const d = NOISE.getChannelData(0); for (let i=0;i<n;i++) d[i] = Math.random()*2-1;
+    audioOK = true;
+    if (AC.state === 'suspended') AC.resume().catch(()=>{});
+  }catch(e){ AC = null; audioOK = false; }
+}
+let sndCount = 0, sndWin = 0;
+function canSnd(){ if(!audioOK || !AC || AC.state!=='running') return false; if (sndCount > 40) return false; sndCount++; return true; }
+function tone(f, dur, type, vol, f2, delay){
+  if(!canSnd()) return;
+  try{
+    const t = AC.currentTime + (delay||0);
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+    if (f2) o.frequency.exponentialRampToValueAtTime(Math.max(20,f2), t+dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol||0.2, t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    o.connect(g); g.connect(MASTER); o.start(t); o.stop(t+dur+0.02);
+  }catch(e){}
+}
+function noise(dur, freq, vol, ftype, q, delay, f2){
+  if(!canSnd()) return;
+  try{
+    const t = AC.currentTime + (delay||0);
+    const s = AC.createBufferSource(); s.buffer = NOISE;
+    const f = AC.createBiquadFilter(); f.type = ftype || 'bandpass'; f.frequency.setValueAtTime(freq, t); f.Q.value = q || 1.2;
+    if (f2) f.frequency.exponentialRampToValueAtTime(f2, t+dur);
+    const g = AC.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol||0.1, t+0.01); g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    s.connect(f); f.connect(g); g.connect(MASTER); s.start(t, Math.random()*0.5); s.stop(t+dur+0.02);
+  }catch(e){}
+}
+const SFX = {
+  press(){ tone(170,0.09,'sine',0.28,110); noise(0.05,900,0.08); },
+  boing(){ tone(200,0.22,'triangle',0.22,560); },
+  tumble(i){ noise(0.035,1500+i*260,0.1,'bandpass',3); },
+  land(){ tone(130,0.12,'sine',0.3,80); noise(0.06,700,0.1); },
+  hop(i){ tone(380+i*55,0.12,'sine',0.17,620+i*60); },
+  kasa(){ noise(0.16,3600,0.2,'bandpass',0.8); noise(0.12,5200,0.12,'bandpass',0.8,0.09); },
+  patan(){ tone(120,0.13,'triangle',0.3,70); noise(0.07,1100,0.14,'bandpass',2,0.02); },
+  rainTick(w){ noise(0.025, 3200 - w*1500 + Math.random()*900, 0.06, 'bandpass', 4); },
+  drip(w){ tone(420+w*800, 0.07, 'sine', 0.07, 700+w*900); },
+  snowTick(s){ noise(0.12, 7000 - s*3000, 0.035, 'highpass', 0.7); },
+  clack(){ tone(640,0.05,'square',0.05,520); tone(320,0.06,'triangle',0.12,240); },
+  wheel(v){ tone(300+v*120,0.035,'square',0.04,260); },
+  creak(){ tone(180,0.35,'sawtooth',0.05,320); },
+  swoosh(){ noise(0.6,800,0.18,'bandpass',1.4,0,4000); },
+  splash(){ noise(0.25,1200,0.15,'lowpass',1,0,400); },
+  slide(){ noise(0.8,500,0.12,'lowpass',1,0,1500); },
+  tick(){ tone(880,0.04,'sine',0.06,700); },
+  pin(){ tone(1300,0.05,'square',0.06,900); tone(660,0.12,'triangle',0.14,880,0.04); },
+  chime(){ [523,659,784,1047].forEach((f,i)=>tone(f,0.35,'triangle',0.16,0,i*0.08)); },
+  fanfare(){ [392,523,659,784,1047,1319].forEach((f,i)=>tone(f,0.45,'triangle',0.17,0,i*0.09)); [262,392].forEach((f,i)=>tone(f,0.9,'sine',0.14,0,0.45+i*0.02)); },
+  unfold(){ for(let i=0;i<6;i++){ noise(0.08,900+i*300,0.1,'bandpass',2,i*0.12); tone(260+i*60,0.08,'triangle',0.08,0,i*0.12); } },
+  pick(i){ tone(523*Math.pow(1.26,i),0.18,'triangle',0.16,0); },
+  puzzled(){ tone(400,0.12,'sine',0.1,300); tone(300,0.15,'sine',0.08,420,0.13); },
+  wave(){ tone(700,0.08,'sine',0.08,900); }
+};
+
+/* ============================================================
+   コルーチン（rAF 駆動のみ）
+   ============================================================ */
+let CO = [];
+function spawn(gen){ const c = { g:gen, w:0, done:false }; CO.push(c); return c; }
+function stepCo(dt){
+  const list = CO.slice();
+  for (const c of list){
+    if (c.done) continue;
+    c.w -= dt; if (c.w > 0) continue;
+    let r;
+    try { r = c.g.next(); } catch(e){ c.done = true; recover(e); continue; }
+    if (r.done) { c.done = true; continue; }
+    c.w = (typeof r.value === 'number' && r.value > 0) ? r.value : 0;
+  }
+  CO = CO.filter(c => !c.done);
+}
+function* tween(dur, f){ let t = 0; for(;;){ t += DT; const p = Math.min(1, t/dur); f(p); if (p >= 1) return; yield 0; } }
+function* join(c){ while(!c.done) yield 0; }
+const ERRS = [];
+function recover(e){ // 何があっても操作不能にしない
+  ERRS.push(String(e && e.stack || e).slice(0,300));
+  busy = false; if (mode !== 'board' && mode !== 'select') { mode = 'board'; R.rise = 0; WD.pop = 0; WD.links = 0; G.space='b'; }
+}
+
+/* ============================================================
+   盤面（道）
+   ============================================================ */
+const SEQ = 'HRSRHSSRHRSHR';
+const PATH = [];
+PATH.push({ x:60, y:160, c:null });
+for (let i=1;i<=6;i++) PATH.push({ x:145+85*(i-1), y:160, c:SEQ[i-1] });
+PATH.push({ x:590, y:308, c:SEQ[6] });
+for (let i=8;i<=13;i++) PATH.push({ x:570-85*(i-8), y:455, c:SEQ[i-1] });
+PATH.push({ x:62, y:445, c:'G' });
+const GOAL = PATH.length - 1;
+const RACK = { H:[100,532], R:[185,532], S:[270,532] };
+const DICE = { x:320, y:300, s:116 };
+const GAL = [[382,530],[442,530],[502,530],[578,530]];
+const SLOTS = [[200,150],[320,150],[440,150]];
+const MEDS = { H:[160,335], R:[320,335], S:[480,335] };
+
+/* ============================================================
+   世界（劇場）の状態 ＝ 遊びの記憶
+   ============================================================ */
+const WD = {
+  W:0, Wd:0,            // 樋の水量
+  S:0, Sd:0,            // 坂の積雪
+  P:0, Pd:0,            // 受け皿の雪（＝橋の持ち上げ）
+  awn:0, awnD:0,        // 日よけ
+  gate:0, gateD:0,      // 水門
+  star:0, starD:0,      // 飾り（星）
+  wheelA:0, wheelV:0,
+  boatX:200, boatY:330, boatOv:null,
+  sledD:0.12, sledOv:null,
+  bundle:null,
+  emb:null, embA:0,     // 天気の紋
+  raining:false, snowing:false, sunny:false,
+  flow:0, ovf:0, panSpill:0, awnStream:0, melt:0, sSpill:0, shade:0,
+  pull:0, pullTo:0,
+  pop:0, links:0,
+  bridgeA:-70,
+  wob:{},
+};
+const DOLLS = [
+  { x:420, y:520, reg:'R', c:'red',   path:[], face:-1, ph:0, jump:0, wob:0 },
+  { x:480, y:520, reg:'R', c:'cream', path:[], face:-1, ph:1.3, jump:0, wob:0 },
+  { x:540, y:520, reg:'R', c:'ink',   path:[], face:-1, ph:2.6, jump:0, wob:0 },
+];
+const disc = { d1a:0,d1:0,d2a:0,d2:0,d3a:0,d3:0,d4:0,d4n:0,d5:0,d5b:0,d6:0,d6b:0, log:[] };
+function mark(k){ if(!disc[k]){ disc[k] = 1; disc.log.push({k, t:+TIME.toFixed(1)}); return true; } return false; }
+
+/* 旅人 */
+const G = { space:'b', x:PATH[0].x, y:PATH[0].y, sc:1, cos:null, pose:'idle', lx:0, ly:0, blink:0, sq:0, squash:0,
+            flip:1, spin:0, mouth:0, walk:0, wob:0, sit:false, boat:false, lookAt:null, wave:0, poseT:0 };
+let journey = { rolls:0, forced:['H','R','S'], n:1 };
+let mode = 'board';      // board | rise | select | show | fold
+let busy = false;
+const R = { rise:0 };
+const dice = { press:0, pressT:0, face:'H', jump:0, rot:0, ox:0, oy:0, sx:1, sy:1, wob:0, rolling:false, faces:['H','R','S'], tumble:0, call:0 };
+const flyers = [];       // 飛ぶ衣装
+let sel = null;          // 公演の衣装選び
+let pending = null;      // 未保存の縮図
+let lastInput = 0, hintDone = false, selHintDone = false, hint = { on:false, t:0, kind:'dice' };
+let firstTouch = false, frames = 0;
+
+/* ============================================================
+   保存（端末内・検証・例外処理）
+   ============================================================ */
+const KEY = 'gf261107_10_shows_v1';
+const Store = { ok:true, status:'init', shows:[] };
+function num01(v){ return (typeof v === 'number' && isFinite(v)) ? clamp(v,0,1) : null; }
+function validShow(s){
+  if (!s || typeof s !== 'object') return null;
+  if (typeof s.o !== 'string' || !/^[HRS]{3}$/.test(s.o)) return null;
+  if (!s.i || typeof s.i !== 'object' || !s.f || typeof s.f !== 'object') return null;
+  const i = { W:num01(s.i.W), S:num01(s.i.S), P:num01(s.i.P), a:num01(s.i.a), g:num01(s.i.g), st:num01(s.i.st) };
+  const f = { W:num01(s.f.W), S:num01(s.f.S), P:num01(s.f.P), st:num01(s.f.st) };
+  for (const k in i) if (i[k] === null) return null;
+  for (const k in f) if (f[k] === null) return null;
+  return { o:s.o, i, f };
+}
+function storeLoad(){
+  let raw = null;
+  try { raw = window.localStorage.getItem(KEY); }
+  catch(e){ Store.ok = false; Store.status = 'denied'; Store.shows = []; return; }
+  if (raw === null || raw === undefined){ Store.status = 'empty'; return; }
+  try {
+    const d = JSON.parse(raw);
+    if (!d || d.v !== 1 || !Array.isArray(d.shows)) throw new Error('bad');
+    const v = d.shows.slice(0,3).map(validShow).filter(Boolean);
+    if (v.length !== Math.min(3, d.shows.length)) Store.status = 'partial'; else Store.status = 'restored';
+    Store.shows = v;
+  } catch(e){ Store.status = 'broken'; Store.shows = []; }
+}
+function storeSave(){
+  if (!Store.ok) return false;
+  try { window.localStorage.setItem(KEY, JSON.stringify({ v:1, shows:Store.shows })); Store.status = 'saved'; return true; }
+  catch(e){ Store.ok = false; Store.status = 'denied'; return false; }
+}
+
+/* ============================================================
+   粒子（上限つき）
+   ============================================================ */
+const MAXP = 170;
+const PS = [];
+function addP(o){ if (PS.length >= MAXP) return null; PS.push(o); return o; }
+function confetti(space, x, y, n){
+  for (let i=0;i<n;i++) addP({ k:'conf', sp:space, x, y, vx:rnd(-130,130), vy:rnd(-260,-90), life:0, max:rnd(0.9,1.4), r:rnd(3,6), rot:rnd(0,6), vr:rnd(-8,8), c:i%2?'red':'cream' });
+}
+
+/* ============================================================
+   劇場の幾何
+   ============================================================ */
+const SL = { tx:62, ty:182, bx:170, by:280 };
+SL.len = Math.hypot(SL.bx-SL.tx, SL.by-SL.ty); SL.ux = (SL.bx-SL.tx)/SL.len; SL.uy = (SL.by-SL.ty)/SL.len;
+SL.nx = SL.uy; SL.ny = -SL.ux; // 上向き法線
+const TR = { x0:170, x1:444, top:288, bot:340 };
+const waterTop = w => TR.bot - 2 - w*46;
+const AWN = { hx:552, hy:172 };
+function awnGeom(a){
+  const ang = lerp(Math.PI/2, 2.95, a), len = lerp(34, 196, a);
+  return { ang, len, dx:Math.cos(ang), dy:Math.sin(ang), tx:AWN.hx+Math.cos(ang)*len, ty:AWN.hy+Math.sin(ang)*len };
+}
+const BR = { hx:350, hy:520, len:112 };
+function bridgeClass(p){ p = (p===undefined) ? WD.P : p; return p < 0.17 ? 'hang' : p < 0.5 ? 'flat' : 'ramp'; }
+function bridgeAngle(c){ return c==='hang' ? -70 : c==='flat' ? 0 : 37; }
+function bridgeTip(){ const a = WD.bridgeA*Math.PI/180; return [BR.hx - BR.len*Math.cos(a), BR.hy - BR.len*Math.sin(a)]; }
+const P1 = [420,255], P2 = [250,255];
+const panY = () => 368 + Math.min(1, WD.Pd)*66;
+const starY = () => 486 - WD.starD*150;
+const WHEEL = { x:120, y:428, r:38 };
+
+/* 人形の移動（経路は橋の状態しだい） */
+function dollTarget(kind, i){
+  const cls = bridgeClass();
+  if (kind === 'shade') return { reg:'R', x:400+i*52, y:520 };
+  if (kind === 'rain') return WD.awn > 0.5 ? { reg:'R', x:415+i*48, y:520 } : { reg:'R', x:362+i*28, y:520 };
+  if (kind === 'home') return { reg:'R', x:420+i*55, y:520 };
+  // snow / bridge
+  if (cls === 'flat') return { reg:'L', x:172+i*26, y:520 };
+  if (cls === 'ramp') return { reg:'E', x:226+i*22, y:448 };
+  return { reg:'R', x:372+i*30, y:520 };
+}
+function planPath(d, tg){
+  const cls = bridgeClass();
+  const P = [];
+  let reg = d.reg;
+  if (reg === tg.reg){ P.push([tg.x,tg.y]); return { path:P, reg:tg.reg }; }
+  if (reg === 'R' && tg.reg === 'L' && cls === 'flat'){ P.push([355,520],[240,520],[tg.x,tg.y]); return { path:P, reg:'L' }; }
+  if (reg === 'R' && tg.reg === 'E' && cls === 'ramp'){ P.push([355,520],[261,451],[tg.x,tg.y]); return { path:P, reg:'E' }; }
+  if (reg === 'L' && tg.reg === 'R' && cls === 'flat'){ P.push([240,520],[355,520],[tg.x,tg.y]); return { path:P, reg:'R' }; }
+  if (reg === 'E' && tg.reg === 'R' && cls === 'ramp'){ P.push([262,451],[350,520],[tg.x,tg.y]); return { path:P, reg:'R' }; }
+  if (reg === 'L' && tg.reg === 'R'){ P.push([248,520],[300,546],[352,520],[tg.x,tg.y]); return { path:P, reg:'R' }; } // みぞをぴょんと越える
+  if (reg === 'E' && tg.reg !== 'E'){ P.push([200,448],[190,520]); if (tg.reg==='L') P.push([tg.x,tg.y]); else P.push([150+Math.random()*60,520]); return { path:P, reg:'L' }; }
+  // 行けないときは今いる場所でようすを見る
+  if (reg === 'L') return { path:[[160+Math.random()*80,520]], reg:'L' };
+  if (reg === 'E') return { path:[[226+Math.random()*44,448]], reg:'E' };
+  return { path:[[362+Math.random()*60,520]], reg:'R' };
+}
+function dollsGo(kind){
+  DOLLS.forEach((d,i) => { const tg = dollTarget(kind,i); const pl = planPath(d,tg); d.path = pl.path; d.nreg = pl.reg; });
+}
+function dollsCheer(){ DOLLS.forEach((d,i)=> d.jump = 0.6 + i*0.12); }
+
+/* ============================================================
+   天気（衣装→天気→仕掛け）
+   ============================================================ */
+function setEmb(k){ WD.emb = k; WD.embLast = k; WD.embA = 0; }
+function pullCord(which){ WD.pull = 1; WD.pullTo = which; }
+function girlCheer(t){ G.pose = 'cheer'; G.mouth = 1; G.poseT = t || 1.2; }
+
+function* weatherSun(){
+  setEmb('H'); WD.sunny = true; G.pose = 'hat'; G.poseT = 3.5;
+  yield 0.45;
+  if (WD.awn < 0.5){ WD.awn = 1; pullCord('awn'); SFX.patan(); yield 0.5; SFX.patan(); }
+  mark('d1a');
+  dollsGo('shade');
+  yield 0.4;
+  if (WD.P > 0.02){ // 受け皿の雪がとけて水に
+    const p0 = WD.P; WD.melt = 1;
+    yield* tween(1.0, p => { const np = p0*(1-p); const dW = (WD.P - np)*0.5; WD.P = np; WD.W = Math.min(1, WD.W + dW); if (Math.random()<0.25) SFX.drip(WD.W); });
+    WD.P = 0; WD.melt = 0; SFX.creak(); dollsGo('shade');
+    yield 0.3;
+  }
+  WD.gate = 1; pullCord('gate'); SFX.clack();
+  yield 0.45;
+  if (WD.W > 0.04){
+    const amt = WD.W; let rel = 0; const st0 = WD.star;
+    while (WD.W > 0.001){
+      const d = Math.min(WD.W, DT*0.5); WD.W -= d; rel += d;
+      WD.flow = 1; WD.star = Math.min(1, st0 + rel*0.8);
+      yield 0;
+    }
+    WD.W = 0; WD.flow = 0;
+    if (amt > 0.1) { if (mark('d4')) { SFX.chime(); confetti('t', 74, starY(), 10); } }
+    if (WD.star >= 0.99 && st0 < 0.99){ SFX.fanfare(); confetti('t', 74, starY(), 18); dollsCheer(); girlCheer(); }
+    else if (amt > 0.1){ SFX.chime(); dollsCheer(); girlCheer(); }
+  } else {
+    mark('d4n'); // 水がないので水車は回らない（順番の比較）
+    G.pose = 'puzzle'; G.poseT = 1.2; SFX.puzzled();
+  }
+  yield 0.4;
+  WD.sunny = false;
+}
+
+function* bundleSlide(amt){
+  const b = { amt, ph:'slope', t:0, x:0, y:0, ang:Math.atan2(SL.uy,SL.ux) };
+  WD.bundle = b; SFX.slide();
+  const s0 = Math.max(0.1, amt*0.5);
+  yield* tween(0.7, p => { const s = lerp(s0, 1, ease(p))*SL.len; b.x = SL.tx + SL.ux*s + SL.nx*8; b.y = SL.ty + SL.uy*s + SL.ny*8; });
+  b.ph = 'trough'; b.ang = 0;
+  const y0 = () => Math.min(waterTop(WD.Wd) - 4, TR.bot - 8);
+  yield* tween(1.2, p => { b.x = lerp(182, 420, ease(p)); b.y = y0() + Math.sin(p*14)*1.5; });
+  b.ph = 'drop';
+  yield* tween(0.35, p => { b.y = lerp(y0(), panY()-10, p*p); });
+  const before = bridgeClass();
+  const room = 1 - WD.P, add = Math.min(room, amt);
+  WD.P += add;
+  if (amt - add > 0.02) WD.panSpill = 1.4; // 受け皿からあふれた雪は床の排出口へ
+  WD.bundle = null; SFX.patan(); SFX.creak();
+  yield 0.5;
+  const after = bridgeClass();
+  if (after !== before){
+    SFX.chime(); confetti('t', 300, 480, 10); dollsCheer();
+    if (after === 'flat') mark('d5'); if (after === 'ramp') { mark('d5'); mark('d5b'); }
+    G.pose = 'point'; G.poseT = 1.6; G.lookAt = ['t',300,480];
+  }
+  dollsGo('bridge');
+}
+
+function* weatherRain(){
+  setEmb('R');
+  yield 0.4;
+  if (WD.gate > 0.5){ WD.gate = 0; pullCord('gate'); SFX.clack(); }
+  dollsGo('rain');
+  WD.raining = true;
+  const open = WD.awn > 0.5;
+  if (open) mark('d1');
+  const rate = (open ? 0.45 : 0.22) / 2.8;
+  const floatBefore = WD.W >= 0.15, bx0 = boatTarget(WD.W);
+  let t = 0, bc = null;
+  while (t < 2.8){
+    t += DT;
+    WD.W += rate*DT;
+    if (WD.W > 1){ WD.W = 1; WD.ovf = 0.6; }
+    if (!bc && t > 0.7 && WD.S > 0.08){ const a = WD.S; WD.S = 0; bc = spawn(bundleSlide(a)); }
+    if (Math.random() < DT*(5+WD.W*4)) SFX.drip(WD.W);
+    yield 0;
+  }
+  WD.raining = false;
+  if (WD.W >= 0.15 && !floatBefore){ if (mark('d2a')) { SFX.chime(); } G.lookAt = ['boat']; G.poseT = 2; }
+  if (floatBefore && boatTarget(WD.W) > bx0 + 8){ if (mark('d2')) SFX.chime(); G.lookAt = ['boat']; }
+  if (WD.W >= 0.93 && boatTarget(Math.max(0,WD.W - rate*2.8)) < 380){ SFX.fanfare(); confetti('t', 410, 280, 12); dollsCheer(); girlCheer(); }
+  if (bc) yield* join(bc);
+  yield 0.4;
+}
+
+function* weatherSnow(){
+  setEmb('S'); G.pose = 'cheer'; G.poseT = 3;
+  yield 0.4;
+  WD.snowing = true;
+  const had = WD.S > 0.05;
+  if (WD.awn > 0.5){ yield 0.6; WD.awn = 0; pullCord('awn'); SFX.patan(); } // 雪の重みで幕をたたむ
+  let t = 0; const add = 0.34;
+  while (t < 2.6){
+    t += DT;
+    WD.S += add*DT/2.6;
+    if (WD.S > 1){ WD.S = 1; WD.sSpill = 0.5; }
+    if (Math.random() < DT*(6+WD.S*6)) SFX.snowTick(WD.S);
+    yield 0;
+  }
+  WD.snowing = false;
+  SFX.swoosh();
+  mark('d3a'); if (had) { if (mark('d3')) SFX.chime(); }
+  if (WD.S >= 0.99){ SFX.chime(); confetti('t', 170, 270, 10); }
+  dollsGo('snow');
+  yield 0.6;
+}
+function* weather(c){
+  if (c === 'H') yield* weatherSun();
+  else if (c === 'R') yield* weatherRain();
+  else yield* weatherSnow();
+  WD.emb = null;
+}
+const boatTarget = w => w < 0.15 ? 200 : 200 + (w-0.15)/0.85*190;
+
+/* ============================================================
+   盤の進行
+   ============================================================ */
+function perm3(notFirst){
+  const all = [['H','R','S'],['H','S','R'],['R','H','S'],['R','S','H'],['S','H','R'],['S','R','H']];
+  const ok = all.filter(p => p[0] !== notFirst);
+  return ok[Math.floor(Math.random()*ok.length)].slice();
+}
+function chooseRoll(){
+  if (journey.rolls < 3) return journey.forced[journey.rolls];
+  const cand = ['H','R','S'].filter(c => c !== G.cos);
+  const sc = {};
+  for (const c of cand){
+    let s = Math.random()*1.4;
+    if (c==='H'){ if (WD.W > 0.2 && !disc.d4) s += 2.2; if (WD.W > 0.3) s += 0.8; if (WD.awn < 0.5 && !disc.d1) s += 1; if (!disc.d4n && WD.W < 0.05) s += 0.6; }
+    if (c==='R'){ if (WD.S > 0.2 && !disc.d5) s += 2.2; if (WD.S > 0.2) s += 0.7; if (WD.awn > 0.5 && !disc.d1) s += 2; if (WD.W >= 0.15 && !disc.d2) s += 1.2; }
+    if (c==='S'){ if (!disc.d3) s += 1.3; if (disc.d5 && !disc.d5b) s += 1.6; if (WD.S < 0.3) s += 0.3; }
+    sc[c] = s;
+  }
+  cand.sort((a,b) => sc[b]-sc[a]);
+  return Math.random() < 0.72 ? cand[0] : cand[Math.floor(Math.random()*cand.length)];
+}
+function nextSquare(from, c){ for (let i=from+1;i<GOAL;i++) if (PATH[i].c === c) return i; return GOAL; }
+
+function* diceRoll(res){
+  dice.rolling = true; SFX.boing();
+  let k = 0;
+  yield* tween(0.78, p => {
+    dice.jump = Math.sin(p*Math.PI)*90; dice.rot = p*TAU*1.5; dice.ox = Math.sin(p*Math.PI*2)*18;
+    const nk = Math.floor(p*9); if (nk !== k){ k = nk; dice.face = ['H','R','S'][k%3]; SFX.tumble(k); }
+    dice.sx = 1 + Math.sin(p*Math.PI)*0.06; dice.sy = 1 - Math.sin(p*Math.PI)*0.04;
+  });
+  dice.face = res; dice.jump = 0; dice.rot = 0; dice.ox = 0; SFX.land();
+  yield* tween(0.28, p => { const s = Math.sin(p*Math.PI)*(1-p); dice.sx = 1 + s*0.25; dice.sy = 1 - s*0.3; });
+  dice.sx = dice.sy = 1; dice.rolling = false;
+}
+function* hopTo(nx, ny, h, dur, i){
+  const sx = G.x, sy = G.y;
+  SFX.hop(i||0);
+  G.squash = 0.7;
+  yield 0.06;
+  yield* tween(dur, p => { G.x = lerp(sx,nx,p); G.y = lerp(sy,ny,p) - Math.sin(p*Math.PI)*h; G.squash = -Math.sin(p*Math.PI)*0.6; G.flip = nx < sx ? -1 : nx > sx ? 1 : G.flip; });
+  G.squash = 0.9;
+}
+function* dress(c){
+  const from = G.cos;
+  const [rx, ry] = RACK[c];
+  const f = { c, x:rx, y:ry, sp:'b', p:0, tx:G.x, ty:G.y-70, s:1 };
+  flyers.push(f); SFX.kasa();
+  if (from){ flyers.push({ c:from, x:G.x, y:G.y-70, sp:'b', p:0, tx:RACK[from][0], ty:RACK[from][1], s:1, back:true }); }
+  G.cos = null;
+  yield* tween(0.36, p => { for (const q of flyers) q.p = easeOut(p); G.spin = p; });
+  flyers.length = 0;
+  G.cos = c; G.spin = 0; G.squash = 0.6; SFX.kasa();
+  yield 0.15;
+}
+function* rollSeq(){
+  busy = true;
+  try {
+    const res = chooseRoll();
+    yield* diceRoll(res);
+    G.lookAt = null;
+    const tgt = nextSquare(G.sq, res);
+    let i = 0;
+    while (G.sq < tgt){ const n = PATH[G.sq+1]; yield* hopTo(n.x, n.y, 34, 0.26, i++); G.sq++; }
+    yield* dress(res);
+    yield* weather(res);
+    journey.rolls++;
+    if (G.sq >= GOAL){ yield* riseSeq(); }
+  } finally { busy = false; }
+}
+
+/* ============================================================
+   変身（盤が折り目から立ち上がる）・公演・折り戻し
+   ============================================================ */
+function walkPts(){
+  const [ax, ay] = bToS(PATH[GOAL].x, PATH[GOAL].y);
+  const [bx, by] = tToS(48, 176);
+  let c1, c2;
+  if (L.portrait){ const [ex, ey] = tToS(24, 176); const [lx, ly] = tToS(24, 600); return [ax, ay, lx, ly + 80*L.bs, lx, ly - 200*L.ts, ex, ey]; }
+  else { c1 = [lerp(ax,bx,0.45), ay + 30*L.bs]; c2 = [bx - 70*L.ts, by + 40*L.ts]; }
+  return [ax, ay, c1[0], c1[1], c2[0], c2[1], bx, by];
+}
+function bez(P, t){ const u = 1-t;
+  return [u*u*u*P[0]+3*u*u*t*P[2]+3*u*t*t*P[4]+t*t*t*P[6], u*u*u*P[1]+3*u*u*t*P[3]+3*u*t*t*P[5]+t*t*t*P[7]]; }
+
+function* riseSeq(){
+  mode = 'rise';
+  mark('d6');
+  SFX.unfold();
+  G.pose = 'cheer'; G.poseT = 2;
+  yield* tween(1.9, p => { R.rise = p; WD.pop = ease(clamp(p*1.3-0.3,0,1)); WD.links = ease(clamp(p*1.6-0.6,0,1)); });
+  R.rise = 1; WD.pop = 1; WD.links = 1;
+  SFX.fanfare(); confetti('t', 320, 300, 20); dollsCheer();
+  sel = { slots:[], t:0, picked:{}, flash:-1 };
+  mode = 'select';
+  lastInput = TIME;
+}
+function snapWorld(){ return { W:WD.W, S:WD.S, P:WD.P, a:WD.awn, g:WD.gate, st:WD.star }; }
+function loadWorld(s){
+  WD.W = s.W; WD.S = s.S; WD.P = s.P; WD.awn = s.a > 0.5 ? 1 : 0; WD.gate = s.g > 0.5 ? 1 : 0; WD.star = s.st;
+}
+function* showSeq(order, replay){
+  mode = 'show';
+  sel.act = 0;
+  const init = snapWorld();
+  for (let k=0;k<3;k++){
+    sel.act = k;
+    G.space = 'b'; G.x = PATH[GOAL].x; G.y = PATH[GOAL].y;
+    yield* dress(order[k]);
+    yield* weather(order[k]);
+    yield 0.25;
+  }
+  sel.act = 3;
+  yield* parade();
+  const fin = { W:WD.W, S:WD.S, P:WD.P, st:WD.star };
+  if (!replay){ pending = { o:order.join(''), i:init, f:fin, t:0 }; mark('d6b'); }
+  yield 0.6;
+  yield* foldSeq();
+}
+function* parade(){
+  // 道の上を歩いて劇場へ
+  const P = walkPts();
+  G.space = 's';
+  const dur = 2.2;
+  yield* tween(dur, p => { const [x,y] = bez(P, ease(p)); G.x = x; G.y = y; G.sc = lerp(L.bs, L.ts*0.52, p); G.walk += DT*12; G.flip = 1; });
+  G.space = 't'; G.x = 48; G.y = 176; G.sc = 0.52;
+  // そり
+  WD.sledOv = WD.sledD;
+  yield* tween(0.5, p => { WD.sledOv = lerp(WD.sledD, 0.04, p); });
+  const S0 = WD.S;
+  const onSlope = s => [SL.tx + SL.ux*s*SL.len + SL.nx*(snowThick(WD.Sd)+3), SL.ty + SL.uy*s*SL.len + SL.ny*(snowThick(WD.Sd)+3)];
+  yield* hopTo(onSlope(0.06)[0], onSlope(0.06)[1], 14, 0.3, 0);
+  if (S0 >= 0.2){
+    G.sit = true; SFX.swoosh();
+    yield* tween(0.35 + S0*0.8, p => { const s = lerp(0.06, S0, ease(p)); WD.sledOv = s; const [x,y] = onSlope(s); G.x = x; G.y = y; });
+    G.sit = false;
+    if (S0 >= 0.95){ SFX.chime(); confetti('t', G.x, G.y, 8); }
+    else { const [x,y] = onSlope(S0); G.x = x; G.y = y; }
+  }
+  // 残りは歩いて下りる
+  { const s1 = S0 >= 0.2 ? S0 : 0.06; let s = s1; let i = 0;
+    while (s < 0.97){ s = Math.min(0.97, s + 0.16); const [x,y] = onSlope(s); yield* hopTo(x, y, 8, 0.2, i++); } }
+  WD.sledOv = null;
+  yield* hopTo(178, TR.top - 2, 18, 0.3, 2);
+  // 舟
+  if (WD.W >= 0.2){
+    const bx = WD.boatX;
+    yield* walkTo(Math.max(180, bx - 26), TR.top - 2, 70);
+    WD.boatOv = bx;
+    yield* hopTo(bx, WD.boatY - 6, 22, 0.3, 3);
+    G.boat = true; G.lookAt = null;
+    yield* tween(Math.max(0.6, (425 - bx)/110), p => { WD.boatOv = lerp(bx, 425, ease(p)); G.x = WD.boatOv; G.y = WD.boatY - 6; });
+    SFX.chime();
+    G.boat = false;
+    yield* hopTo(448, TR.top - 2, 20, 0.3, 4);
+    WD.boatOv = null;
+  } else {
+    G.pose = 'balance'; G.poseT = 99;
+    yield* walkTo(448, TR.top - 2, 55);
+    G.pose = 'idle'; G.poseT = 0;
+  }
+  // つながった階段で下へ
+  yield* hopTo(462, 400, 14, 0.25, 2);
+  yield* hopTo(474, 460, 14, 0.25, 3);
+  yield* hopTo(480, 520, 14, 0.25, 4);
+  // 橋
+  const cls = bridgeClass();
+  yield* walkTo(356, 520, 80);
+  if (cls === 'flat'){
+    yield* walkTo(240, 520, 70); SFX.chime();
+    yield* walkTo(104, 520, 80);
+  } else if (cls === 'ramp'){
+    yield* walkTo(262, 451, 60);
+    yield* walkTo(222, 448, 60);
+    G.pose = 'cheer'; G.poseT = 1; SFX.chime(); confetti('t', 222, 410, 8);
+    yield 0.5;
+    yield* hopTo(190, 520, 30, 0.4, 5);
+    yield* walkTo(104, 520, 80);
+  } else {
+    yield* hopTo(300, 548, 16, 0.35, 1); SFX.splash();
+    for (let i=0;i<6;i++) addP({ k:'drop', sp:'t', x:300, y:545, vx:rnd(-70,70), vy:rnd(-160,-60), life:0, max:0.6 });
+    yield 0.25;
+    yield* hopTo(236, 520, 36, 0.45, 3);
+    yield* walkTo(104, 520, 80);
+  }
+  // 星
+  G.flip = -1;
+  if (WD.star >= 0.6){
+    G.pose = 'cheer'; G.poseT = 2.2; SFX.fanfare(); confetti('t', 74, starY(), 22); dollsCheer();
+  } else {
+    pullCord('star'); const s0 = WD.star; WD.star = Math.min(1, s0 + 0.35); SFX.chime();
+    G.pose = 'cheer'; G.poseT = 1.6; confetti('t', 74, starY(), 8);
+  }
+  yield 1.6;
+  // おじぎ
+  G.pose = 'bow'; G.poseT = 0.9; SFX.chime();
+  yield 1.0;
+}
+function snowThick(s){ return s <= 0.001 ? 0 : 8 + s*10; }
+function* walkTo(x, y, sp){
+  const sx = G.x, sy = G.y, d = Math.hypot(x-sx, y-sy);
+  if (d < 1) return;
+  G.flip = x < sx ? -1 : 1;
+  yield* tween(Math.max(0.05, d/(sp||80)), p => { G.x = lerp(sx,x,p); G.y = lerp(sy,y,p); G.walk += DT*12; });
+}
+function* foldSeq(){
+  mode = 'fold';
+  SFX.unfold();
+  // 旅人は道のはじまりへ
+  const [sx0, sy0] = G.space === 't' ? tToS(G.x, G.y) : G.space === 's' ? [G.x, G.y] : bToS(G.x, G.y);
+  const sc0 = G.space === 't' ? L.ts*0.52 : G.space === 's' ? G.sc : L.bs;
+  G.space = 's';
+  const tgt = journey.replayBack ? PATH[journey.replayBack.sq] : PATH[0];
+  yield* tween(1.6, p => {
+    R.rise = 1 - ease(p); WD.pop = 1 - ease(clamp(p*1.4,0,1)); WD.links = 1 - ease(clamp(p*2,0,1));
+    const [tx, ty] = bToS(tgt.x, tgt.y);
+    G.x = lerp(sx0, tx, ease(p)); G.y = lerp(sy0, ty, ease(p)) - Math.sin(p*Math.PI)*80*L.bs; G.sc = lerp(sc0, L.bs, p);
+  });
+  R.rise = 0; WD.pop = 0; WD.links = 0;
+  G.space = 'b'; G.x = tgt.x; G.y = tgt.y; G.pose = 'idle'; G.sit = false; G.boat = false;
+  WD.star = 0; pullCord('star'); // 飾りは幕あいで下ろす
+  sel = null;
+  if (journey.replayBack){ const rb = journey.replayBack; journey.replayBack = null; restoreLive(rb); }
+  else { G.sq = 0; journey = { rolls:0, forced:perm3(G.cos), n:journey.n+1 }; }
+  dice.call = 0;
+  mode = 'board'; lastInput = TIME;
+}
+let liveSnap = null;
+function captureLive(){ return { w:snapWorld(), dolls:DOLLS.map(d => ({ x:d.x, y:d.y, reg:d.reg })), sq:G.sq, cos:G.cos, journey:{ ...journey } }; }
+function restoreLive(s){
+  loadWorld(s.w);
+  DOLLS.forEach((d,i) => { const q = s.dolls[i]; d.x = q.x; d.y = q.y; d.reg = q.reg; d.path = []; });
+  G.sq = s.sq; G.cos = s.cos; journey = s.journey; journey.replayBack = null;
+  const p = PATH[G.sq]; G.x = p.x; G.y = p.y;
+}
+function* replaySeq(card){
+  busy = true;
+  try {
+    const live = captureLive();
+    yield* riseFromCard();
+    loadWorld(card.i);
+    DOLLS.forEach((d,i) => { d.reg = 'R'; d.x = 420+i*55; d.y = 520; d.path = []; });
+    dollsGo('bridge');
+    sel = { slots:card.o.split(''), t:0, act:0, picked:{}, flash:-1, replay:true };
+    journey.replayBack = live;
+    yield 0.5;
+    yield* showSeq(card.o.split(''), true);
+  } finally { busy = false; }
+}
+function* riseFromCard(){
+  mode = 'rise'; SFX.unfold();
+  const [sx, sy] = bToS(G.x, G.y);
+  G.space = 's'; const [gx, gy] = bToS(PATH[GOAL].x, PATH[GOAL].y);
+  yield* tween(1.6, p => { R.rise = p; WD.pop = ease(clamp(p*1.3-0.3,0,1)); WD.links = ease(clamp(p*1.6-0.6,0,1)); G.x = lerp(sx, gx, ease(p)); G.y = lerp(sy, gy, ease(p)) - Math.sin(p*Math.PI)*60*L.bs; G.sc = L.bs; });
+  R.rise = 1; WD.pop = 1; WD.links = 1;
+  G.space = 'b'; G.x = PATH[GOAL].x; G.y = PATH[GOAL].y;
+}
+
+/* ============================================================
+   入力（Pointer Events・一本指）
+   ============================================================ */
+let activeId = null, downHit = null, downAt = [0,0], downT = 0;
+function wob(key){ WD.wob[key] = 1; SFX.tick(); }
+function hitTest(sx, sy){
+  const [bx, by] = sToB(sx, sy);
+  const [tx, ty] = sToT(sx, sy);
+  const inB = bx > -20 && bx < BW+20 && by > -20 && by < BH+20;
+  if (mode === 'board'){
+    if (inB){
+      const dd = Math.hypot(bx - DICE.x, by - DICE.y);
+      if (dd < DICE.s*0.92) return { k:'dice' };
+      for (let i=0;i<GAL.length;i++){ const g = GAL[i]; if (Math.abs(bx-g[0]) < 30 && Math.abs(by-g[1]) < 28) return { k:'gal', i }; }
+      if (Math.abs(bx - G.x) < 34 && by < G.y + 10 && by > G.y - 125 && G.space==='b') return { k:'girl' };
+      for (const c of ['H','R','S']){ const r = RACK[c]; if (Math.hypot(bx-r[0], by-r[1]) < 34) return { k:'rack', c }; }
+      for (let i=0;i<PATH.length;i++){ const p = PATH[i]; if (Math.abs(bx-p.x) < 36 && Math.abs(by-p.y) < 36) return { k:'tile', i }; }
+    }
+  } else if (mode === 'select' && sel){
+    if (inB){
+      for (const c of ['H','R','S']){ const m = MEDS[c]; if (Math.hypot(bx-m[0], by-m[1]) < 78) return { k:'med', c }; }
+      for (let i=0;i<3;i++){ const s = SLOTS[i]; if (Math.hypot(bx-s[0], by-s[1]) < 52) return { k:'slot', i }; }
+    }
+  }
+  // 劇場の物（ふれた物だけ小さく揺れる）
+  if (tx > 30 && tx < 610 && ty > 60 && ty < 575){
+    const ag = awnGeom(WD.awnD);
+    const objs = [
+      ['boat', WD.boatX, WD.boatY-10, 34], ['sled', ...sledPos(), 26], ['wheel', WHEEL.x, WHEEL.y, 44],
+      ['star', 74, starY(), 26], ['awn', (AWN.hx+ag.tx)/2, (AWN.hy+ag.ty)/2+8, Math.max(30, ag.len*0.45)],
+      ['gate', 170, TR.top+20-WD.gateD*38, 22], ['pan', 420, panY(), 26], ['hand', 170, 112, 26], ['emb', 320, 155, 40],
+      ['bridge', ...bridgeMid(), 40]
+    ];
+    for (let i=0;i<DOLLS.length;i++){ const d = DOLLS[i]; if (Math.hypot(tx-d.x, ty-(d.y-18)) < 24) return { k:'doll', i }; }
+    for (const o of objs){ if (Math.hypot(tx-o[1], ty-o[2]) < o[3]) return { k:'obj', o:o[0] }; }
+  }
+  return null;
+}
+function sledPos(){ const s = (WD.sledOv !== null ? WD.sledOv : WD.sledD)*SL.len; const th = snowThick(WD.Sd); return [SL.tx + SL.ux*s + SL.nx*(th+8), SL.ty + SL.uy*s + SL.ny*(th+8)]; }
+function bridgeMid(){ const t = bridgeTip(); return [(BR.hx+t[0])/2, (BR.hy+t[1])/2]; }
+function onDown(h){
+  hint.on = false;
+  if (mode === 'board' && !hintDone && TIME > 0.5) {} // お手本中の入力は消すだけ
+  if (!h) return;
+  if (h.k === 'dice'){
+    if (!busy && mode === 'board'){ dice.press = 1; dice.pressT = TIME; SFX.press(); }
+    else { dice.wob = 1; SFX.tick(); }
+  } else if (h.k === 'med'){
+    if (mode === 'select' && sel.slots.length < 3 && !sel.starting){
+      const c = h.c; const i = sel.slots.length;
+      sel.slots.push(c); SFX.pick(i); SFX.kasa();
+      flyers.push({ c, x:MEDS[c][0], y:MEDS[c][1], sp:'b', p:0, tx:SLOTS[i][0], ty:SLOTS[i][1], s:1.1, sel:true, t0:TIME });
+      WD.wob['med'+c] = 1;
+      if (sel.slots.length === 3){ sel.starting = true; spawn(startShow()); }
+    }
+  } else if (h.k === 'slot'){
+    if (mode === 'select' && !sel.starting && h.i < sel.slots.length){ sel.slots.splice(h.i,1); SFX.kasa(); WD.wob['slot'+h.i] = 1; }
+    else wob('slot'+h.i);
+  } else if (h.k === 'gal'){
+    galTap(h.i);
+  } else if (h.k === 'girl'){ G.wave = 1; SFX.wave(); }
+  else if (h.k === 'rack'){ wob('rack'+h.c); }
+  else if (h.k === 'tile'){ wob('tile'+h.i); }
+  else if (h.k === 'doll'){ DOLLS[h.i].wob = 1; SFX.tick(); }
+  else if (h.k === 'obj'){ wob(h.o); }
+}
+function* startShow(){
+  busy = true;
+  try {
+    yield 0.55;
+    yield* showSeq(sel.slots.slice(), false);
+  } finally { busy = false; }
+}
+function galCards(){
+  const cards = Store.shows.map((s,i) => ({ s, pinned:true, slot:i }));
+  if (pending) cards.push({ s:pending, pinned:false, slot:3 });
+  return cards;
+}
+function galTap(i){
+  if (i === 3){
+    if (pending && mode === 'board'){
+      const s = { o:pending.o, i:pending.i, f:pending.f };
+      Store.shows.push(s); if (Store.shows.length > 3) Store.shows.shift();
+      pending = null; storeSave(); SFX.pin(); confetti('b', GAL[Math.min(2,Store.shows.length-1)][0], 520, 8);
+    } else wob('gal3');
+    return;
+  }
+  const s = Store.shows[i];
+  if (s && mode === 'board' && !busy){ SFX.pin(); busy = true; spawn(replaySeq(s)); }
+  else wob('gal'+i);
+}
+function onUp(h, sx, sy){
+  if (h && h.k === 'dice' && dice.press > 0 && !busy && mode === 'board'){
+    const moved = Math.hypot(sx-downAt[0], sy-downAt[1]);
+    dice.press = 0;
+    if (moved < 140*L.bs || Math.hypot(sToB(sx,sy)[0]-DICE.x, sToB(sx,sy)[1]-DICE.y) < DICE.s*1.6){
+      hintDone = true; busy = true; spawn(rollSeq());
+    }
+  }
+  dice.press = 0;
+}
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  initAudio();
+  firstTouch = true;
+  lastInput = TIME;
+  if (hint.on){ hint.on = false; if (hint.kind === 'dice') hintDone = true; else selHintDone = true; }
+  if (activeId !== null) return; // 余分な指は無視
+  activeId = e.pointerId;
+  try { cv.setPointerCapture(e.pointerId); } catch(_){}
+  downAt = [e.clientX, e.clientY]; downT = TIME;
+  downHit = hitTest(e.clientX, e.clientY);
+  onDown(downHit);
+}, { passive:false });
+cv.addEventListener('pointerup', e => {
+  e.preventDefault();
+  if (e.pointerId !== activeId) return;
+  activeId = null; const h = downHit; downHit = null;
+  onUp(h, e.clientX, e.clientY);
+}, { passive:false });
+function cancelPtr(e){ if (e.pointerId !== activeId) return; activeId = null; downHit = null; dice.press = 0; }
+cv.addEventListener('pointercancel', cancelPtr);
+cv.addEventListener('lostpointercapture', cancelPtr);
+cv.addEventListener('pointermove', e => { e.preventDefault(); }, { passive:false });
+['contextmenu','selectstart','dragstart','gesturestart','gesturechange','dblclick'].forEach(t => document.addEventListener(t, e => e.preventDefault(), { passive:false }));
+document.addEventListener('touchmove', e => e.preventDefault(), { passive:false });
+document.addEventListener('touchstart', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive:false });
+
+/* ============================================================
+   更新
+   ============================================================ */
+function update(dt){
+  TIME += dt; DT = dt;
+  sndWin += dt; if (sndWin > 0.25){ sndWin = 0; sndCount = 0; }
+  stepCo(dt);
+  // 表示値のなめらかな追従
+  WD.Wd = appr(WD.Wd, WD.W, 5, dt); WD.Sd = appr(WD.Sd, WD.S, 4, dt); WD.Pd = appr(WD.Pd, WD.P, 3, dt);
+  WD.awnD = appr(WD.awnD, WD.awn, 7, dt); WD.gateD = appr(WD.gateD, WD.gate, 6, dt); WD.starD = appr(WD.starD, WD.star, 2.5, dt);
+  WD.bridgeA = appr(WD.bridgeA, bridgeAngle(bridgeClass(WD.Pd > WD.P ? WD.P : WD.Pd)), 3, dt);
+  WD.sledD = appr(WD.sledD, Math.max(0.12, Math.min(0.97, WD.S)), 2.2, dt);
+  WD.embA = appr(WD.embA, WD.emb ? 1 : 0, 6, dt);
+  WD.pull = Math.max(0, WD.pull - dt*1.6);
+  WD.ovf = Math.max(0, WD.ovf - dt); WD.sSpill = Math.max(0, WD.sSpill - dt);
+  WD.shade = appr(WD.shade, (WD.sunny && WD.awnD > 0.6) ? 1 : 0, 3, dt);
+  if (WD.flow > 0 && !WD.raining) WD.flow = Math.max(0, WD.flow - dt*0.8);
+  const wv = WD.flow > 0.05 ? 5*WD.flow : 0;
+  WD.wheelV = appr(WD.wheelV, wv, 3, dt); WD.wheelA += WD.wheelV*dt;
+  if (WD.wheelV > 0.5 && Math.random() < dt*WD.wheelV*1.5) SFX.wheel(WD.wheelV/5);
+  // 舟
+  const bt = WD.boatOv !== null ? WD.boatOv : boatTarget(WD.Wd);
+  WD.boatX = WD.boatOv !== null ? WD.boatOv : appr(WD.boatX, bt, 1.6, dt);
+  WD.boatY = WD.Wd < 0.15 ? TR.bot - 6 : waterTop(WD.Wd) - 2 + Math.sin(TIME*2.4)*1.6;
+  for (const k in WD.wob){ WD.wob[k] = Math.max(0, WD.wob[k] - dt*2.4); }
+  dice.wob = Math.max(0, dice.wob - dt*2.5);
+  G.wave = Math.max(0, G.wave - dt*1.2);
+  // 人形
+  for (const d of DOLLS){
+    d.wob = Math.max(0, d.wob - dt*2.4); d.jump = Math.max(0, d.jump - dt);
+    if (d.path.length){
+      const [px, py] = d.path[0]; const dx = px - d.x, dy = py - d.y, dist = Math.hypot(dx,dy);
+      const sp = 82*dt;
+      if (dist <= sp){ d.x = px; d.y = py; d.path.shift(); if (!d.path.length && d.nreg) d.reg = d.nreg; }
+      else { d.x += dx/dist*sp; d.y += dy/dist*sp; d.face = dx < 0 ? -1 : 1; d.ph += dt*12; }
+    }
+  }
+  // 旅人の表情
+  G.blink = (TIME % 3.7) < 0.12 ? 1 : 0;
+  if (G.poseT > 0){ G.poseT -= dt; if (G.poseT <= 0 && G.pose !== 'balance'){ G.pose = 'idle'; G.mouth = 0; } }
+  G.squash = appr(G.squash, 0, 10, dt);
+  // 粒子
+  stepParticles(dt);
+  // ヒント
+  const idle = TIME - lastInput;
+  if (mode === 'board' && !busy){
+    if (!hintDone && idle > 4){ if (!hint.on){ hint.on = true; hint.t = 0; hint.kind = 'dice'; } }
+    if (hintDone && idle > 4){
+      const ph0 = dice.call % 2.6; dice.call += dt;
+      if (dice.call % 2.6 < ph0 || ph0 === 0){ if (G.pose === 'idle' && G.space === 'b'){ G.pose = 'point'; G.poseT = 0.9; G.flip = DICE.x < G.x ? -1 : 1; } }
+    } else dice.call = 0;
+  } else if (mode === 'select' && sel && !sel.starting){
+    if (!selHintDone && idle > 4){ if (!hint.on){ hint.on = true; hint.t = 0; hint.kind = 'sel'; } }
+  } else if (hint.on && (busy || mode === 'show')) hint.on = false;
+  if (hint.on) hint.t += dt;
+  if (pending) pending.t += dt;
+  if (sel) sel.t += dt;
+}
+
+function stepParticles(dt){
+  // 発生
+  if (WD.raining){
+    const n = dt*(46 + WD.W*24), cnt = Math.floor(n) + (Math.random() < n%1 ? 1 : 0);
+    for (let i=0;i<cnt;i++){ addP({ k:'rain', sp:'t', x:rnd(50,590), y:rnd(105,125), vx:-30, vy:rnd(480,560), life:0, max:1.2 }); }
+    if (Math.random() < dt*(14 + WD.W*22)) SFX.rainTick(WD.W);
+  }
+  if (WD.snowing){
+    const n = dt*28;
+    if (Math.random() < n - Math.floor(n)) addP({ k:'snow', sp:'t', x:rnd(50,590), y:rnd(105,120), vx:rnd(-12,12), vy:rnd(55,85), life:0, max:6, r:rnd(2.5,4.5), ph:rnd(0,6) });
+    for (let i=0;i<Math.floor(n);i++) addP({ k:'snow', sp:'t', x:rnd(50,590), y:rnd(105,120), vx:rnd(-12,12), vy:rnd(55,85), life:0, max:6, r:rnd(2.5,4.5), ph:rnd(0,6) });
+    // 坂の上を重点的に
+    if (Math.random() < dt*10) addP({ k:'snow', sp:'t', x:rnd(60,175), y:110, vx:rnd(-8,8), vy:rnd(60,80), life:0, max:6, r:rnd(3,4.5), ph:rnd(0,6) });
+  }
+  if (WD.panSpill > 0){ WD.panSpill -= dt; if (Math.random() < dt*22) addP({ k:'snow', sp:'t', x:rnd(398,442), y:panY()-6, vx:rnd(-20,20), vy:90, life:0, max:3, r:3.5, ph:0 }); }
+  if (WD.sSpill > 0 && Math.random() < dt*20) addP({ k:'snow', sp:'t', x:rnd(166,176), y:282, vx:rnd(-10,10), vy:80, life:0, max:3, r:3.5, ph:0 });
+  const ag = awnGeom(WD.awnD);
+  for (let i=PS.length-1;i>=0;i--){
+    const p = PS[i];
+    p.life += dt;
+    let dead = p.life > p.max;
+    if (p.k === 'rain'){
+      p.x += p.vx*dt; p.y += p.vy*dt;
+      // 日よけで受ける
+      if (WD.awnD > 0.6 && p.x > ag.tx && p.x < AWN.hx){ const ay = lerp(AWN.hy, ag.ty, (AWN.hx-p.x)/(AWN.hx-ag.tx)); if (p.y > ay) dead = true; }
+      if (p.x > TR.x0 && p.x < TR.x1 && p.y > waterTop(WD.Wd)) { dead = true; if (Math.random()<0.15) addP({ k:'drop', sp:'t', x:p.x, y:waterTop(WD.Wd), vx:rnd(-30,30), vy:rnd(-90,-40), life:0, max:0.35 }); }
+      if (p.x > SL.tx && p.x < SL.bx){ const sy = SL.ty + (p.x-SL.tx)*(SL.uy/SL.ux); if (p.y > sy) dead = true; }
+      if (p.y > 520) dead = true;
+    } else if (p.k === 'snow'){
+      p.ph += dt*2; p.x += (p.vx + Math.sin(p.ph)*16)*dt; p.y += p.vy*dt;
+      if (p.x > SL.tx && p.x < SL.bx){ const sy = SL.ty + (p.x-SL.tx)*(SL.uy/SL.ux) - snowThick(WD.Sd); if (p.y > sy && p.y < sy + 30) dead = true; }
+      if (WD.awnD > 0.6 && p.x > ag.tx && p.x < AWN.hx){ const ay = lerp(AWN.hy, ag.ty, (AWN.hx-p.x)/(AWN.hx-ag.tx)); if (p.y > ay - 4 && p.y < ay + 10) dead = true; }
+      if (p.y > 518) dead = true;
+    } else if (p.k === 'drop'){
+      p.vy += 600*dt; p.x += p.vx*dt; p.y += p.vy*dt;
+    } else if (p.k === 'conf'){
+      p.vy += 420*dt; p.vx *= (1 - dt*1.2); p.x += p.vx*dt; p.y += p.vy*dt; p.rot += p.vr*dt;
+    }
+    if (dead){ PS[i] = PS[PS.length-1]; PS.pop(); }
+  }
+}
+
+/* ============================================================
+   描画：旅人
+   ============================================================ */
+function arm(x, y, a, len){
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  rr(-3.6, -2, 7.2, len, 3.6, 'cream'); circ(0, len, 5, 'cream');
+  ctx.restore();
+}
+function drawGirl(){
+  const g = G;
+  ctx.save();
+  // 伸び縮み
+  const sq = g.squash;
+  ctx.scale(1 + sq*0.12, 1 - sq*0.16);
+  if (g.spin > 0) ctx.scale(Math.cos(g.spin*TAU) || 0.05, 1);
+  let bob = (g.walk ? Math.abs(Math.sin(g.walk))*3 : 0);
+  if (g.sit) bob = -14;
+  ctx.translate(0, -bob);
+  const pose = g.pose;
+  let aL = 0.28, aR = -0.28, lenL = 30, lenR = 30;
+  if (pose === 'hat'){ aR = -2.85; lenR = 38; aL = 0.4; }
+  else if (pose === 'cheer'){ aL = 2.5 + Math.sin(TIME*10)*0.15; aR = -2.5 - Math.sin(TIME*10)*0.15; }
+  else if (pose === 'point'){ aR = -1.9; lenR = 34; }
+  else if (pose === 'balance'){ aL = 1.5 + Math.sin(TIME*6)*0.2; aR = -1.5 + Math.sin(TIME*6)*0.2; }
+  else if (pose === 'puzzle'){ aL = 0.3; aR = -2.6; lenR = 32; }
+  if (g.wave > 0){ aR = -2.6 + Math.sin(TIME*18)*0.4; }
+  const bow = pose === 'bow' ? 0.35 : 0;
+  sh(() => {
+    // 背中側
+    if (g.cos === 'R'){ poly([-11,-64, 11,-64, 34,-12, -34,-12], 'ink'); }
+    if (!g.sit){ rect(-12,-24,7,24,'ink'); rect(5,-24,7,24,'ink'); }
+    else { rect(-14,-24,22,7,'ink'); }
+    ctx.save(); ctx.translate(0,-24); ctx.rotate(bow*0.6); ctx.translate(0,24);
+    poly([-15,-64, 15,-64, 27,-20, -27,-20], 'red');
+    if (g.cos === 'S'){
+      poly([-15,-67, 15,-67, 38,-33, 0,-24, -38,-33], 'cream');
+      poly([-26,-46, -16,-40, -8,-48, 0,-40, 8,-48, 16,-40, 26,-46, 32,-38, 0,-30, -32,-38], 'red');
+    }
+    if (g.cos === 'R'){ poly([-13,-66, 13,-66, 24,-44, 0,-38, -24,-44], 'ink'); circ(-6,-54,2.6,'cream'); circ(6,-54,2.6,'cream'); circ(0,-46,2.6,'cream'); }
+    arm(-14,-60,aL,lenL); arm(14,-60,aR,lenR);
+    brad(-14,-60,2.6); brad(14,-60,2.6);
+    // 頭
+    ctx.save(); ctx.translate(0,-62); ctx.rotate(bow); ctx.translate(0,62);
+    if (g.cos === 'R'){ circ(0,-85,32,'ink'); circ(0,-84,28.5,'red'); }
+    circ(-27,-81,9,'ink'); circ(27,-81,9,'ink');
+    circ(0,-87,25,'ink');
+    circ(0,-83,22,'cream');
+    // 前髪
+    poly([-23,-88, -18,-103, -6,-110, 6,-110, 18,-103, 23,-88, 16,-93, 9,-89, 2,-94, -6,-89, -13,-94], 'ink');
+    if (!SH){
+      const lx = g.lx*3.2, ly = g.ly*2.6;
+      if (g.blink) { rect(-11+lx,-84+ly,7,2,'ink'); rect(4+lx,-84+ly,7,2,'ink'); }
+      else { ell(-7.5+lx,-83+ly,3.2,4.2,'ink'); ell(7.5+lx,-83+ly,3.2,4.2,'ink'); }
+      circ(-14,-75,3.6,'red'); circ(14,-75,3.6,'red');
+      if (g.mouth || pose === 'cheer') { halfDisc(0,-73,5.5,5,'ink',false); }
+      else if (pose === 'puzzle') { circ(2,-72,2.4,'ink'); }
+      else halfDisc(0,-74,4.5,3,'ink',false);
+    }
+    if (g.cos === 'H'){
+      ell(0,-104,37,8,'red'); rr(-16,-127,32,25,9,'red'); rect(-16,-110,32,5,'cream');
+    } else if (g.cos === 'S'){
+      halfDisc(0,-101,21,17,'cream',true); rect(-21,-104,42,5,'red'); circ(0,-121,6,'red');
+    }
+    ctx.restore();
+    ctx.restore();
+  });
+  ctx.restore();
+}
+function placeGirl(){
+  if (G.space === 'b'){ setB(); ctx.translate(G.x, G.y + 12); }
+  else if (G.space === 't'){ setT(); ctx.translate(G.x, G.y); ctx.scale(0.52, 0.52); }
+  else { setScreen(); ctx.translate(G.x, G.y + 12*G.sc); ctx.scale(G.sc, G.sc); }
+  if (G.flip < 0) ctx.scale(-1, 1);
+}
+function girlHeadScreen(){
+  if (G.space === 'b') return bToS(G.x, G.y - 72);
+  if (G.space === 't') return tToS(G.x, G.y - 44);
+  return [G.x, G.y - 72*G.sc];
+}
+function updateLook(){
+  let tgt = null;
+  if (G.lookAt){
+    if (G.lookAt[0] === 'boat') tgt = tToS(WD.boatX, WD.boatY);
+    else if (G.lookAt[0] === 't') tgt = tToS(G.lookAt[1], G.lookAt[2]);
+  } else if (WD.emb && mode === 'board') tgt = WD.emb === 'R' ? tToS(WD.boatX, WD.boatY) : WD.emb === 'S' ? tToS(110, 230) : tToS(320, 155);
+  else if (mode === 'board' && !busy) tgt = bToS(DICE.x, DICE.y);
+  else if (mode === 'select' && sel) { const nx = ['H','R','S'][Math.floor(sel.t*0.9)%3]; tgt = bToS(MEDS[nx][0], MEDS[nx][1]); }
+  if (!tgt){ G.lx = appr(G.lx, 0, 6, DT); G.ly = appr(G.ly, 0, 6, DT); return; }
+  const [hx, hy] = girlHeadScreen();
+  let dx = tgt[0]-hx, dy = tgt[1]-hy; const d = Math.hypot(dx,dy) || 1;
+  dx /= d; dy /= d; if (G.flip < 0) dx = -dx;
+  G.lx = appr(G.lx, dx, 6, DT); G.ly = appr(G.ly, dy, 6, DT);
+}
+
+/* ============================================================
+   描画：衣装アイコン
+   ============================================================ */
+function drawCostume(c, s){
+  ctx.save(); ctx.scale(s, s);
+  sh(() => {
+    if (c === 'H'){ ell(0,8,32,8,'red'); rr(-15,-16,30,24,9,'red'); rect(-15,0,30,5,'cream'); }
+    else if (c === 'R'){ circ(0,-12,15,'ink'); poly([-9,-6, 9,-6, 27,28, -27,28], 'ink'); circ(0,-10,8,'bg'); circ(-5,8,2.6,'cream'); circ(5,8,2.6,'cream'); circ(-6,18,2.6,'cream'); circ(6,18,2.6,'cream'); }
+    else if (c === 'S'){ poly([-11,-18, 11,-18, 34,8, 0,22, -34,8], 'cream'); poly([-23,-4,-13,2,-5,-6,0,2,5,-6,13,2,23,-4,28,4,0,13,-28,4],'red'); circ(-34,10,4,'red'); circ(34,10,4,'red'); circ(0,24,4,'red'); }
+  });
+  ctx.restore();
+}
+
+/* ============================================================
+   描画：盤
+   ============================================================ */
+function tilePos(i){
+  // 変身中：道のマスが立ち上がり、劇場への通路へ移る（スクリーン座標）
+  const p = PATH[i];
+  const [bx, by] = bToS(p.x, p.y);
+  const rise = R.rise;
+  if (rise <= 0) return { x:bx, y:by, s:L.bs, st:0, e:0 };
+  const e = clamp(rise*1.7 - (i/GOAL)*0.7, 0, 1);
+  const P = walkPts();
+  const t = (GOAL - i + 0.5)/(GOAL+1);
+  const [wx, wy] = bez(P, t);
+  const ee = ease(e);
+  const ws = lerp(L.bs*0.75, L.ts*(L.portrait ? 0.36 : 0.5), t);
+  return { x:lerp(bx,wx,ee), y:lerp(by,wy,ee) - Math.sin(e*Math.PI)*60*L.bs, s:lerp(L.bs, ws, ee)*0.7 + 0.3*lerp(L.bs,ws,ee), st:Math.sin(e*Math.PI), e:ee };
+}
+function drawTile(i, tp){
+  const p = PATH[i];
+  setScreen(); ctx.translate(tp.x, tp.y); ctx.scale(tp.s, tp.s);
+  const w = WD.wob['tile'+i] || 0; if (w) ctx.rotate(Math.sin(TIME*30)*w*0.1);
+  ctx.rotate(((i*37)%7-3)*0.012);
+  // 立ち上がり：縦につぶれて影が伸びる
+  const st = tp.st;
+  if (st > 0) ctx.scale(1, 1 - st*0.55);
+  const sz = i === GOAL ? 88 : 70;
+  sh(() => {
+    if (i === GOAL){
+      rr(-44,-40,88,80,8,'red'); rect(-34,-26,68,54,'ink');
+      poly([-34,-26, -6,-26, -20,28, -34,28],'red'); poly([34,-26, 6,-26, 20,28, 34,28],'red');
+      for (let k=0;k<5;k++) circ(-30+k*15,-30,7,'red');
+      star5(0,0,10,'cream',TIME*0.5);
+    } else {
+      rr(-sz/2,-sz/2,sz,sz,9,'cream');
+    }
+  }, 1 + st*2.5);
+  if (p.c && p.c !== 'G'){ ctx.translate(0,2); drawCostume(p.c, 0.92); }
+  if (i === 0){ circ(0,0,10,'red'); brad(0,0,4); }
+}
+function drawBoard(){
+  setB();
+  // 道の帯（紙帯）と折り目
+  if (R.rise < 0.02){
+    sh(() => {
+      for (let i=0;i<GOAL;i++){
+        const a = PATH[i], b = PATH[i+1];
+        const dx = b.x-a.x, dy = b.y-a.y, d = Math.hypot(dx,dy), nx = -dy/d*13, ny = dx/d*13;
+        poly([a.x+nx,a.y+ny, b.x+nx,b.y+ny, b.x-nx,b.y-ny, a.x-nx,a.y-ny], 'red');
+      }
+    });
+    // 折り目（切り込み）
+    for (let x=40;x<600;x+=26) rect(x, 307, 12, 3, 'ink');
+  }
+  // 洗濯ひもの衣装
+  if (mode === 'board' || mode === 'rise' || mode === 'fold'){
+    setB();
+    thread([55,505, 330,505], 2);
+    for (const c of ['H','R','S']){
+      const [x,y] = RACK[c];
+      rect(x-3,500,6,12,'red');
+      if (G.cos === c || flyers.some(f => f.c === c)) continue;
+      setB(); ctx.translate(x, y);
+      const w = WD.wob['rack'+c] || 0; ctx.rotate(Math.sin(TIME*1.4 + x)*0.05 + Math.sin(TIME*30)*w*0.15);
+      drawCostume(c, 0.85);
+    }
+  }
+  // マス
+  for (let i=GOAL;i>=0;i--){ drawTile(i, tilePos(i)); }
+  // 通路の帯（変身後）
+  if (R.rise > 0.85){
+    const P = walkPts();
+    setScreen();
+    const k = clamp((R.rise-0.85)/0.15, 0, 1);
+    sh(() => {
+      for (let j=0;j<24;j++){
+        const t0 = j/24, t1 = (j+1)/24; if (t1 > k) break;
+        const [x0,y0] = bez(P,t0), [x1,y1] = bez(P,t1);
+        const w = lerp(L.bs*14, L.ts*(L.portrait ? 8 : 10), t0);
+        const dx = x1-x0, dy = y1-y0, d = Math.hypot(dx,dy) || 1, nx = -dy/d*w, ny = dx/d*w;
+        poly([x0+nx,y0+ny, x1+nx,y1+ny, x1-nx,y1-ny, x0-nx,y0-ny], j%2 ? 'cream' : 'red');
+      }
+    }, 1.5);
+    // 立った道のマスを上に
+    for (let i=GOAL;i>=0;i--){ const tp = tilePos(i); if (tp.e > 0.98){ drawTile(i, tp); } }
+  }
+  if (mode === 'board' || mode === 'fold' || (mode === 'rise' && R.rise < 0.3)) drawDice();
+  if (mode === 'select' || mode === 'show' || (mode === 'rise' && R.rise > 0.5) || (mode === 'fold' && R.rise > 0.5)) drawSelect();
+  drawGallery();
+}
+function drawDiceFace(c, s){ ctx.save(); ctx.scale(s,s); drawCostume(c, 1.15); ctx.restore(); }
+function drawDice(){
+  setB();
+  const d = dice;
+  const ready = !busy && mode === 'board';
+  let callJ = 0;
+  if (ready && d.call > 0){ const ph = d.call % 2.6; if (ph < 0.5) callJ = Math.sin(ph/0.5*Math.PI)*24; }
+  const idleJ = ready ? Math.abs(Math.sin(TIME*3))*6 : 0;
+  const s = DICE.s/2, press = Math.max(d.press, hint.on && hint.kind === 'dice' && (hint.t % 1.6) > 0.5 && (hint.t % 1.6) < 0.85 ? 0.45 : 0);
+  ctx.translate(DICE.x + d.ox, DICE.y + s);
+  if (ready){ // 紙の後光（次に触る物）
+    const rays = 12, R0 = DICE.s*0.68, R1 = R0 + 14 + Math.sin(TIME*4)*6;
+    const ps = [];
+    for (let i=0;i<rays*2;i++){ const a = i*Math.PI/rays + TIME*0.4; const r = i%2 ? R0 : R1; ps.push(Math.cos(a)*r, Math.sin(a)*r - s); }
+    poly(ps, 'cream'); circ(0, -s, R0-2, 'bg');
+  }
+  const lift = d.jump + callJ + idleJ;
+  ell(0, 4, s*(1 - Math.min(0.5, lift/200)) + press*8, 8, 'ink');
+  ctx.translate(0, -lift);
+  ctx.scale(d.sx*(1 + press*0.18), d.sy*(1 - press*0.28));
+  ctx.translate(0, -s);
+  if (d.wob) ctx.rotate(Math.sin(TIME*34)*d.wob*0.12);
+  ctx.rotate(Math.sin(d.rot)*0.35);
+  sh(() => {
+    poly([-s,-s, -s+18,-s-16, s+18,-s-16, s,-s], 'red');
+    poly([s,-s, s+18,-s-16, s+18,s-16, s,s], 'red');
+    rr(-s,-s,2*s,2*s,10,'cream');
+  }, 1.4);
+  ctx.save(); ctx.translate(9, -s-8); ctx.scale(1, 0.4); circ(0,0,9,'cream'); ctx.restore();
+  ctx.save(); ctx.translate(s+9, -8); ctx.scale(0.45, 1); circ(0,0,10,'cream'); ctx.restore();
+  drawDiceFace(d.face, 1.25);
+  brad(-s+10, -s+10, 4); brad(s-10, s-10, 4);
+}
+function drawSelect(){
+  const k = mode === 'rise' ? clamp((R.rise-0.5)/0.5,0,1) : mode === 'fold' ? clamp((R.rise-0.5)/0.5,0,1) : 1;
+  setB();
+  // ポケット（三つの幕）
+  for (let i=0;i<3;i++){
+    const [x,y] = SLOTS[i];
+    setB(); ctx.translate(x, y); ctx.scale(k, k);
+    const w = WD.wob['slot'+i] || 0; if (w) ctx.rotate(Math.sin(TIME*30)*w*0.12);
+    const act = sel && sel.act === i && mode === 'show';
+    if (act) ctx.translate(0, -Math.abs(Math.sin(TIME*6))*8);
+    sh(() => { rr(-40,-40,80,80,12, act ? 'red' : 'ink'); rr(-32,-32,64,64,9,'bg'); }, 1.2);
+    for (let j=0;j<4;j++) circ(-30+j*20,-40,8,'red');
+    if (sel && sel.slots[i] && !flyers.some(f => f.sel && f.c === sel.slots[i] && f.tx === x && f.p < 1)) drawCostume(sel.slots[i], 0.95);
+    else if (!(sel && sel.slots[i])) circ(0,0,5 + (sel && sel.slots.length === i && mode === 'select' ? Math.sin(TIME*6)*2 : 0),'cream');
+  }
+  // 糸でつながる
+  setB(); thread([240,150, 280,150], 2); thread([360,150, 400,150], 2);
+  if (mode === 'select' && sel && !sel.starting){
+    const hi = ['H','R','S'][Math.floor(sel.t*0.9)%3];
+    for (const c of ['H','R','S']){
+      const [x,y] = MEDS[c];
+      setB(); ctx.translate(x, y); ctx.scale(k, k);
+      const w = WD.wob['med'+c] || 0;
+      const isHi = c === hi && sel.slots.length < 3;
+      if (isHi) ctx.translate(0, -Math.abs(Math.sin(TIME*5))*12);
+      if (w) ctx.scale(1 + w*0.15, 1 - w*0.1);
+      sh(() => { circ(0,0,58,'cream'); }, 1.5);
+      if (isHi){ const ps = []; for (let i=0;i<20;i++){ const a = i*Math.PI/10 + TIME; const r = i%2 ? 60 : 70; ps.push(Math.cos(a)*r, Math.sin(a)*r); } poly(ps,'cream'); circ(0,0,58,'cream'); }
+      circ(0,0,50,'bg');
+      drawCostume(c, 1.35);
+    }
+  }
+  // 飛んでいる衣装（選び）
+  for (const f of flyers){ if (!f.sel) continue; f.p = Math.min(1, (TIME - f.t0)/0.3); }
+  for (let i=flyers.length-1;i>=0;i--){ const f = flyers[i]; if (f.sel && f.p >= 1) flyers.splice(i,1); }
+}
+function drawGallery(){
+  const cards = galCards();
+  for (const cd of cards){
+    const [x,y] = GAL[cd.slot];
+    setB(); ctx.translate(x, y);
+    const w = WD.wob['gal'+cd.slot] || 0;
+    if (!cd.pinned){ ctx.rotate(Math.sin(TIME*3)*0.12); ctx.translate(0, -Math.abs(Math.sin(TIME*2.2))*5); }
+    else ctx.rotate(Math.sin(TIME*30)*w*0.1 + (cd.slot-1)*0.04);
+    drawMini(cd.s);
+    if (cd.pinned) brad(0,-22,4.5);
+  }
+}
+function drawMini(s){
+  const f = s.f;
+  sh(() => { rr(-27,-24,54,48,5,'red'); });
+  rect(-21,-17,42,30,'bg');
+  // 坂と雪
+  poly([-21,-10, -8,0, -8,3, -21,-7],'red');
+  if (f.S > 0.05) poly([-21,-10, lerp(-21,-8,f.S),lerp(-10,0,f.S), lerp(-21,-8,f.S),lerp(-12,-2,f.S), -21,-13],'cream');
+  // 樋の水
+  rect(-8,3,24,2,'red'); if (f.W > 0.02) rect(-8, 3 - f.W*5, 24, f.W*5, 'ink');
+  // 星
+  star5(-17, 10 - f.st*20, 4, 'cream', 0);
+  // 橋
+  const cls = bridgeClass(f.P); const a = bridgeAngle(cls)*Math.PI/180;
+  rect(-21,11,42,2,'cream');
+  ctx.save(); ctx.translate(14,12); ctx.rotate(Math.PI + a); rect(0,-1,10,2.4,'cream'); ctx.restore();
+  // 衣装の順番
+  for (let i=0;i<3;i++){ ctx.save(); ctx.translate(-16+i*16, 19); drawCostume(s.o[i], 0.2); ctx.restore(); }
+}
+function drawFlyers(){
+  for (const f of flyers){
+    if (f.sel){
+      const p = easeOut(Math.min(1,(TIME - f.t0)/0.3));
+      setB(); ctx.translate(lerp(f.x,f.tx,p), lerp(f.y,f.ty,p) - Math.sin(p*Math.PI)*50); drawCostume(f.c, lerp(1.35,0.95,p));
+      continue;
+    }
+    const p = f.p;
+    let tx = f.tx, ty = f.ty;
+    if (!f.back){ tx = G.x; ty = G.y - 70; }
+    setB(); ctx.translate(lerp(f.x,tx,p), lerp(f.y,ty,p) - Math.sin(p*Math.PI)*60);
+    ctx.rotate((1-p)*0.6*(f.back?-1:1));
+    drawCostume(f.c, 1);
+  }
+}
+function drawHint(){
+  if (!hint.on) return;
+  let x, y;
+  if (hint.kind === 'dice'){ [x, y] = bToS(DICE.x + 26, DICE.y + 92); }
+  else { const c = ['H','R','S'][Math.floor(hint.t/1.6)%3]; [x, y] = bToS(MEDS[c][0]+24, MEDS[c][1]+86); }
+  const ph = hint.t % 1.6;
+  const press = ph > 0.5 && ph < 0.85 ? 1 : 0;
+  const k = Math.min(1, hint.t*3);
+  const off = (1 - Math.min(1, ph/0.5))*50 + (ph > 0.85 ? (ph-0.85)/0.75*50 : 0);
+  setScreen(); ctx.translate(x + off*0.6*L.bs, y + off*L.bs); ctx.scale(L.bs*k*1.35, L.bs*k*1.35);
+  if (press) ctx.scale(0.94, 0.9);
+  sh(() => {
+    rr(-24,26,52,40,8,'red');           // そで
+    rr(-8,-46,16,46,8,'cream');         // 人さし指
+    rr(-20,-6,44,40,16,'cream');        // 手のひら
+    rr(10,-22,13,28,6.5,'cream');
+    rr(-26,0,12,26,6,'cream');
+  }, 1.5);
+  if (press){ ctx.save(); ctx.translate(0,-50); for (let i=0;i<3;i++){ const a = -Math.PI/2 + (i-1)*0.7; rect(Math.cos(a)*16-2, Math.sin(a)*16-2, 4, 9, 'cream'); } ctx.restore(); }
+}
+
+/* ============================================================
+   描画：劇場
+   ============================================================ */
+function drawTheater(){
+  setT();
+  DEPTH = 1 + WD.pop*0.9;
+  // 立体劇場の前舞台（変身で現れる）
+  if (WD.pop > 0.01){
+    const k = WD.pop;
+    poly([20, 565, 620, 565, 620 + 10*k, 565 + 26*k, 20 - 10*k, 565 + 26*k], 'ink');
+    for (let i=0;i<8;i++) rect(40 + i*72, 572*1 + 0, 30, 6*k, 'red');
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(40, 70, 560, 495); ctx.clip();
+  // 奥の飾り（紙の丘）
+  sh(() => { poly([40,470, 110,446, 190,468, 290,440, 390,466, 490,444, 600,470, 600,520, 40,520], 'bg'); }, 0.8);
+  drawEmb();
+  drawPole();
+  drawSlope();
+  drawStrings();
+  drawTrough();
+  drawWheel();
+  drawStreams();
+  drawFloor();
+  drawLedge();
+  drawBridge();
+  drawPan();
+  drawAwning();
+  drawDolls();
+  drawLinks();
+  drawParticles('t');
+  if (G.space === 't'){ placeGirl(); drawGirl(); setT(); }
+  ctx.restore();
+  drawFrame();
+  drawStagehand();
+  if (WD.pop > 0.01) drawWings();
+}
+function drawFrame(){
+  setT(); DEPTH = 1 + WD.pop*0.9;
+  sh(() => {
+    fc('red'); ctx.beginPath(); ctx.rect(10,30,620,560); ctx.rect(40,70,560,495); ctx.fill('evenodd');
+  }, 1.4);
+  // 幕のひだ（上）
+  sh(() => { for (let i=0;i<12;i++){ const x = 40 + i*46.7; halfDisc(x+23.3, 70, 23.3, 26, 'red', false); } rect(40,64,560,8,'red'); });
+  // 両そでの結んだ幕
+  sh(() => {
+    poly([40,72, 58,72, 50,300, 60,560, 40,560],'red');
+    poly([600,72, 582,72, 590,300, 580,560, 600,560],'red');
+  });
+  rect(44, 296, 18, 7, 'cream'); rect(578, 296, 18, 7, 'cream');
+  // 割りピン
+  for (const [x,y] of [[24,44],[616,44],[24,576],[616,576]]) brad(x,y,5);
+  // てっぺんの飾り
+  sh(() => { for (let i=0;i<7;i++){ const x = 120 + i*67; poly([x-14,30, x+14,30, x,10], i%2 ? 'cream' : 'red'); } });
+}
+function drawWings(){
+  const k = WD.pop;
+  setT();
+  sh(() => {
+    poly([10, 30, 10 - 26*k, 60, 10 - 26*k, 600, 10, 590], 'red');
+    poly([630, 30, 630 + 26*k, 60, 630 + 26*k, 600, 630, 590], 'red');
+  }, 1.4);
+  for (let i=0;i<5;i++){ circ(10 - 13*k, 120 + i*100, 5*k, 'cream'); circ(630 + 13*k, 120 + i*100, 5*k, 'cream'); }
+}
+function drawEmb(){
+  const a = WD.embA; if (a < 0.02) return;
+  setT(); ctx.translate(320, 160 - (1-a)*60); ctx.scale(a, a);
+  const k = WD.emb || WD.embLast || 'H';
+  if (k === 'H'){
+    sh(() => {
+      const ps = []; for (let i=0;i<24;i++){ const an = i*Math.PI/12 + TIME*0.6; const r = i%2 ? 34 : 50; ps.push(Math.cos(an)*r, Math.sin(an)*r); } poly(ps,'red');
+      circ(0,0,32,'cream');
+    });
+    halfDisc(-10,-2,5,4,'ink',true); halfDisc(10,-2,5,4,'ink',true); halfDisc(0,8,8,6,'red',false);
+  } else {
+    const c = k === 'R' ? 'ink' : 'cream';
+    const wv = WD.wob.emb || 0;
+    ctx.rotate(Math.sin(TIME*30)*wv*0.1);
+    sh(() => { circ(-32,6,22,c); circ(0,-8,30,c); circ(32,4,24,c); rr(-54,4,108,26,13,c); });
+    const fcol = k === 'R' ? 'cream' : 'ink';
+    halfDisc(-12,8,5,4, fcol, true); halfDisc(12,8,5,4, fcol, true);
+    circ(-22,18,3.5,'red'); circ(22,18,3.5,'red');
+  }
+}
+function drawPole(){
+  sh(() => { rect(71,300,6,220,'ink'); });
+  brad(74,300,5);
+  const y = starY();
+  thread([WHEEL.x, WHEEL.y, 74, 300, 74, y - 16], 1.6);
+  const w = WD.wob.star || 0;
+  setT(); ctx.translate(74, y); ctx.rotate(Math.sin(TIME*1.5)*0.12 + Math.sin(TIME*30)*w*0.2);
+  if (WD.starD > 0.9){ const ps = []; for (let i=0;i<16;i++){ const an = i*Math.PI/8 + TIME*1.2; const r = i%2 ? 24 : 33; ps.push(Math.cos(an)*r, Math.sin(an)*r); } poly(ps,'red'); }
+  sh(() => { star5(0,0,19,'cream',0); circ(0,0,6,'red'); });
+  setT();
+}
+function drawSlope(){
+  setT();
+  const { tx, ty, bx, by, nx, ny } = SL;
+  // 坂の板
+  sh(() => { poly([tx,ty, bx,by, bx-nx*12,by-ny*12, tx-nx*12,ty-ny*12], 'red'); });
+  brad(tx - nx*6, ty - ny*6, 4); brad(bx - nx*6 - SL.ux*8, by - ny*6 - SL.uy*8, 3.5);
+  // 支え
+  sh(() => { poly([tx-nx*12+20, ty-ny*12+18, tx-nx*12+30, ty-ny*12+26, 46, 290, 40, 280], 'ink'); });
+  // 雪（折りたたんだ紙帯）
+  const S = WD.Sd;
+  if (S > 0.01){
+    const th = snowThick(S), len = S*SL.len;
+    const ps = [tx, ty];
+    let k = 0;
+    for (let s=0;s<=len;s+=11){ const o = th + (k++%2 ? 4 : 0); ps.push(tx + SL.ux*s + nx*o, ty + SL.uy*s + ny*o); }
+    ps.push(tx + SL.ux*len + nx*th*0.4, ty + SL.uy*len + ny*th*0.4);
+    ps.push(tx + SL.ux*len, ty + SL.uy*len);
+    sh(() => poly(ps, 'cream'), 0.8);
+  }
+  // そり
+  const [sx, sy] = sledPos();
+  const w = WD.wob.sled || 0;
+  setT(); ctx.translate(sx, sy); ctx.rotate(Math.atan2(SL.uy, SL.ux) + Math.sin(TIME*30)*w*0.15); ctx.scale(1.15, 1.15);
+  sh(() => { rr(-16,-8,32,9,3,'red'); rect(-18,2,36,3.5,'cream'); circ(-18,0,3.5,'cream'); rect(-10,-1,3,4,'cream'); rect(8,-1,3,4,'cream'); });
+  setT();
+  // そりの引き糸（上の金具へ）
+  thread([sx, sy, tx + 2, ty - 6], 1.2);
+}
+function drawStrings(){
+  setT();
+  const tip = bridgeTip();
+  const py = panY();
+  thread([420, py - 10, P1[0], P1[1], P2[0], P2[1], tip[0], tip[1]], 1.7);
+  sh(() => { circ(P1[0], P1[1], 9, 'ink'); circ(P2[0], P2[1], 9, 'ink'); });
+  brad(P1[0], P1[1], 4); brad(P2[0], P2[1], 4);
+  rect(P1[0]-2, 70, 4, P1[1]-78, 'ink'); rect(P2[0]-2, 70, 4, P2[1]-78, 'ink');
+}
+function drawTrough(){
+  setT();
+  const wt = waterTop(WD.Wd);
+  // 水（折り紙帯）
+  if (WD.Wd > 0.01){
+    sh(() => zigBand(TR.x0+6, TR.x1-2, wt, TR.bot, 3, 13, Math.floor(TIME*3)%2, 'ink'), 0.5);
+    for (let x=TR.x0+20;x<TR.x1-10;x+=34) rect(x + (TIME*12)%20, wt+6, 12, 2.5, 'cream');
+  }
+  // 舟
+  drawBoat();
+  // 雪の束
+  if (WD.bundle){ const b = WD.bundle; setT(); ctx.translate(b.x, b.y); ctx.rotate(b.ang); const sz = 14 + b.amt*24;
+    sh(() => { const ps = [-sz,6, -sz,-6]; let k = 0; for (let x=-sz;x<=sz;x+=6) ps.push(x, -8 - (k++%2?4:0)); ps.push(sz,-6, sz,6); poly(ps,'cream'); }); setT(); }
+  // 樋の本体（紙の箱）
+  sh(() => {
+    rect(TR.x0-4, TR.top-6, 8, TR.bot-TR.top+12, 'red');
+    rect(TR.x0-4, TR.bot, 404-TR.x0+4, 9, 'red');
+    rect(436, TR.bot, TR.x1-436+6, 9, 'red');
+    rect(TR.x1-2, TR.top-6, 8, TR.bot-TR.top+12, 'red');
+  });
+  // あふれ管（上限の水だけを下へ流す）
+  sh(() => { rect(291, TR.top+4, 10, TR.bot-TR.top+30, 'cream'); rect(288, TR.top+2, 16, 5, 'cream'); }, 0.7);
+  // 脚
+  sh(() => { rect(206, TR.bot+9, 7, 520-TR.bot-9, 'ink'); rect(452, TR.bot+9, 7, 520-TR.bot-9, 'ink'); }, 0.6);
+  // 水門（樋の左端）
+  const g = WD.gateD, gw = WD.wob.gate || 0;
+  setT(); ctx.translate(TR.x0 - 2, TR.top + 22 - g*38); ctx.rotate(Math.sin(TIME*30)*gw*0.08);
+  sh(() => { rr(-9,-26,18,50,4,'cream'); rect(-9,-6,18,4,'red'); });
+  brad(0,-20,3);
+  setT();
+  // 舟着き場の旗
+  sh(() => { rect(TR.x1-14, TR.top-40, 3, 36, 'ink'); poly([TR.x1-11, TR.top-40, TR.x1+8, TR.top-33, TR.x1-11, TR.top-26], 'red'); });
+}
+function drawBoat(){
+  const bx = WD.boatX, by = WD.boatY, w = WD.wob.boat || 0;
+  setT(); ctx.translate(bx, by); ctx.rotate(Math.sin(TIME*2)*0.05 + Math.sin(TIME*30)*w*0.15 + (WD.Wd < 0.15 ? -0.08 : 0));
+  sh(() => {
+    poly([-24,-8, 24,-8, 15,4, -15,4], 'cream');
+    poly([0,-8, 0,-36, 18,-12], 'cream');
+    poly([0,-8, 0,-30, -13,-12], 'red');
+    rect(-1,-38,2.4,30,'ink');
+  });
+  setT();
+}
+function drawWheel(){
+  const { x, y, r } = WHEEL; const w = WD.wob.wheel || 0;
+  sh(() => { poly([x-3,y, x-30,520, x-22,520], 'ink'); poly([x+3,y, x+30,520, x+22,520], 'ink'); }, 0.7);
+  setT(); ctx.translate(x, y); ctx.rotate(WD.wheelA + Math.sin(TIME*30)*w*0.1);
+  sh(() => {
+    for (let i=0;i<8;i++){ ctx.save(); ctx.rotate(i*TAU/8); rect(-3, -r, 6, r, 'cream'); rr(-10, -r-4, 20, 13, 3, i%2 ? 'red' : 'cream'); ctx.restore(); }
+    circ(0,0,13,'red');
+  });
+  brad(0,0,5);
+  setT();
+}
+function streamPts(pts, wdt){ // 折り紙の帯で流れを描く
+  const ps1 = [], ps2 = [];
+  for (let i=0;i<pts.length;i+=2){
+    const j = Math.min(i+2, pts.length-2), k = Math.max(i-2, 0);
+    const dx = pts[j]-pts[k], dy = pts[j+1]-pts[k+1], d = Math.hypot(dx,dy) || 1;
+    const nx = -dy/d, ny = dx/d;
+    const zz = ((i/2 + Math.floor(TIME*8)) % 2) ? 1.6 : -1.6;
+    ps1.push(pts[i] + nx*(wdt+zz), pts[i+1] + ny*(wdt+zz));
+    ps2.unshift(pts[i] - nx*(wdt-zz), pts[i+1] - ny*(wdt-zz));
+  }
+  poly(ps1.concat(ps2), 'ink');
+}
+function drawStreams(){
+  setT();
+  const ag = awnGeom(WD.awnD);
+  // 日よけから樋へ
+  if (WD.raining && WD.awnD > 0.6){
+    const y1 = waterTop(WD.Wd);
+    const pts = []; for (let i=0;i<=8;i++){ const t = i/8; pts.push(ag.tx - 4 + Math.sin(t*3 + TIME*6)*1.5, lerp(ag.ty+8, y1, t)); }
+    sh(() => streamPts(pts, 3.5), 0.5);
+  }
+  // 水門→水車→排出口
+  if (WD.flow > 0.05){
+    const wv = 2 + WD.flow*3.5;
+    const pts = []; for (let i=0;i<=10;i++){ const t = i/10; pts.push(lerp(TR.x0-8, WHEEL.x+28, t) - Math.sin(t*Math.PI)*6, lerp(TR.bot-4, WHEEL.y-30, t*t)); }
+    sh(() => streamPts(pts, wv), 0.5);
+    const p2 = []; for (let i=0;i<=6;i++){ const t = i/6; p2.push(WHEEL.x - 20 + Math.sin(t*4+TIME*5)*2, lerp(WHEEL.y+20, 518, t)); }
+    sh(() => streamPts(p2, wv*0.8), 0.5);
+  }
+  // あふれ口→みぞ
+  if (WD.ovf > 0){
+    const pts = []; for (let i=0;i<=8;i++){ const t = i/8; pts.push(296 + Math.sin(t*5+TIME*7)*2, lerp(TR.bot+30, 545, t)); }
+    sh(() => streamPts(pts, 2.6), 0.5);
+  }
+  // 雪どけのしずく
+  if (WD.melt > 0 && Math.random() < 0.5) addP({ k:'drop', sp:'t', x:rnd(410,430), y:panY()-6, vx:0, vy:-40, life:0, max:0.3 });
+}
+function drawFloor(){
+  setT();
+  sh(() => { rect(40,520,210,50,'cream'); rect(350,520,250,50,'cream'); }, 1.2);
+  // みぞ（排出口）
+  rect(250,520,100,50,'ink');
+  for (let i=0;i<4;i++){ rect(258 + i*24 + ((TIME*14)%24), 538 + (i%2)*8, 12, 2.5, 'bg'); }
+  // 左の排出口（格子）
+  rect(100,519,70,7,'ink'); for (let x=104;x<170;x+=10) rect(x,519,4,7,'cream');
+  // 日かげ
+  if (WD.shade > 0.05){
+    const ag = awnGeom(WD.awnD);
+    const x0 = lerp(AWN.hx, ag.tx - 20, WD.shade);
+    poly([x0, 520, AWN.hx+10, 520, AWN.hx+10, 528, x0 + 10, 528], 'ink');
+  }
+}
+function drawLedge(){
+  sh(() => { rect(200,446,90,10,'cream'); rect(206,456,8,64,'ink'); });
+  sh(() => { rect(272,416,3,30,'ink'); poly([275,416, 292,422, 275,428],'red'); }, 0.6);
+}
+function drawBridge(){
+  setT();
+  const a = WD.bridgeA*Math.PI/180;
+  const w = WD.wob.bridge || 0;
+  ctx.translate(BR.hx, BR.hy); ctx.rotate(a + Math.sin(TIME*30)*w*0.04);
+  sh(() => { rect(-BR.len, -8, BR.len, 9, 'red'); for (let i=0;i<5;i++) rect(-BR.len + 6 + i*22, -11, 12, 4, 'cream'); }, 1.1);
+  setT();
+  brad(BR.hx, BR.hy - 3, 5);
+  const t = bridgeTip(); brad(t[0], t[1] - 3, 3.5);
+}
+function drawPan(){
+  setT();
+  const y = panY(), w = WD.wob.pan || 0;
+  ctx.translate(420, y); ctx.rotate(Math.sin(TIME*30)*w*0.1);
+  sh(() => {
+    if (WD.Pd > 0.02){ const sz = 6 + Math.min(1,WD.Pd)*16; const ps = [-sz,0]; let k = 0; for (let x=-sz;x<=sz;x+=5) ps.push(x, -6 - sz*0.4 - (k++%2?3:0)); ps.push(sz,0); poly(ps,'cream'); }
+    halfDisc(0,-2,24,11,'ink',false);
+    rect(-24,-4,48,4,'ink');
+  });
+  setT();
+  thread([420 - 22, y - 3, 420, y - 12, 420 + 22, y - 3], 1.3);
+}
+function drawAwning(){
+  setT();
+  const a = WD.awnD, g = awnGeom(a), w = WD.wob.awn || 0;
+  const N = 7;
+  const dx = g.dx, dy = g.dy, nx = dy, ny = -dx; // 下向きの厚み方向
+  const thick = 16;
+  // 引きひも（裏方へ）
+  thread([g.tx, g.ty, 186, 120], 1.3);
+  sh(() => {
+    for (let i=0;i<N;i++){
+      const t0 = i/N, t1 = (i+1)/N;
+      const zz0 = (i%2 ? 1 : -1)*(1-a)*5, zz1 = -zz0;
+      const x0 = AWN.hx + dx*g.len*t0, y0 = AWN.hy + dy*g.len*t0 + Math.sin(TIME*30)*w*2;
+      const x1 = AWN.hx + dx*g.len*t1, y1 = AWN.hy + dy*g.len*t1 + Math.sin(TIME*30)*w*2;
+      const c = i%2 ? 'cream' : 'red';
+      poly([x0 + nx*zz0, y0 + ny*zz0 - 2, x1 + nx*zz1, y1 + ny*zz1 - 2, x1 + nx*(thick+zz1), y1 + ny*(thick+zz1), x0 + nx*(thick+zz0), y0 + ny*(thick+zz0)], c);
+      // 切り込みの房
+      const mx = (x0+x1)/2, my = (y0+y1)/2;
+      poly([x0 + nx*thick, y0 + ny*thick, x1 + nx*thick, y1 + ny*thick, mx + nx*(thick+10*a+3), my + ny*(thick+10*a+3)], c);
+    }
+  });
+  sh(() => { rect(AWN.hx-2, AWN.hy-16, 30, 10, 'ink'); rect(AWN.hx+18, AWN.hy-16, 10, 40, 'ink'); }, 0.6);
+  brad(AWN.hx, AWN.hy, 5);
+}
+function drawDoll(d, i){
+  setT();
+  const bob = d.path.length ? Math.abs(Math.sin(d.ph))*3 : 0;
+  const j = d.jump > 0 ? Math.sin((d.jump%0.6)/0.6*Math.PI)*14 : 0;
+  ctx.translate(d.x, d.y - bob - j);
+  if (d.wob) ctx.rotate(Math.sin(TIME*30)*d.wob*0.2);
+  ctx.scale(d.face, 1);
+  sh(() => {
+    rect(-5,-10,3,10,'ink'); rect(2,-10,3,10,'ink');
+    poly([-3,-28, 3,-28, 10,-9, -10,-9], d.c);
+    rect(-9,-26,4,13,'cream'); rect(5,-26,4,13,'cream');
+    circ(0,-33,8,'cream');
+    halfDisc(0,-35,8.5,7,'ink',true);
+  }, 0.7);
+  circ(3,-33,1.4,'ink'); circ(-2,-33,1.4,'ink'); circ(5,-30,1.6,'red');
+  brad(-7,-25,1.6); brad(7,-25,1.6);
+}
+function drawDolls(){ DOLLS.forEach(drawDoll); }
+function drawLinks(){
+  const k = WD.links; if (k < 0.02) return;
+  setT();
+  // 樋の右端から床への階段（変身で現れる）
+  sh(() => {
+    for (let i=0;i<4;i++){ const t = (i+1)/4; if (t > k + 0.01) break; rect(448 + i*10, lerp(TR.bot+10, 512, t) - 4, 34, 7, 'cream'); }
+    // 坂の下と樋をつなぐ渡し板
+    if (k > 0.3) poly([SL.bx-2, SL.by, TR.x0+10, TR.top-4, TR.x0+10, TR.top+2, SL.bx-2, SL.by+6], 'cream');
+  }, 1.2);
+  // 入り口の踊り場
+  sh(() => { rect(40, 168, 30*k, 8, 'cream'); }, 1.2);
+}
+function drawStagehand(){
+  setT();
+  const p = WD.pull;
+  const x = 186, y = 102;
+  const w = WD.wob.hand || 0;
+  ctx.translate(x, y + Math.sin(TIME*30)*w*2);
+  // 腕で糸を引く
+  const pullY = p*10;
+  sh(() => {
+    circ(0, 0, 13, 'cream');
+    halfDisc(0,-3,14,12,'ink',true); rect(-14,-4,28,4,'ink');
+    rr(-12, 8 + pullY, 7, 16, 3.5, 'cream'); rr(5, 8 + pullY*0.6, 7, 16, 3.5, 'cream');
+  });
+  circ(-4,1,1.6,'ink'); circ(4,1,1.6,'ink'); halfDisc(0,6,3,2,'ink',false);
+  setT();
+  // 水門へのひも
+  thread([x + 8, y + 22 + pullY*0.6, TR.x0 - 2, TR.top - 6 - WD.gateD*38], 1.3);
+}
+function drawParticles(sp){
+  for (const p of PS){
+    if (p.sp !== sp) continue;
+    if (p.k === 'rain'){ rect(p.x, p.y, 2.2, 11, 'cream'); }
+    else if (p.k === 'snow'){ circ(p.x, p.y, p.r, 'cream'); }
+    else if (p.k === 'drop'){ circ(p.x, p.y, 2.5, 'ink'); }
+    else if (p.k === 'conf'){ ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); rect(-p.r, -p.r*0.6, p.r*2, p.r*1.2, p.c); ctx.restore(); }
+  }
+}
+
+/* ============================================================
+   背景（反応しない紙の帯）
+   ============================================================ */
+function drawBackground(){
+  setScreen();
+  ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+}
+
+/* ============================================================
+   メインループ
+   ============================================================ */
+let last = 0, raf = 0, running = true;
+function frame(now){
+  raf = 0;
+  if (!running) return;
+  let dt = last ? (now - last)/1000 : 0.016;
+  last = now;
+  dt = Math.min(0.05, Math.max(0, dt)) * SPEED;
+  try {
+    update(dt);
+    updateLook();
+    render();
+  } catch(e){ recover(e); }
+  frames++;
+  raf = requestAnimationFrame(frame);
+}
+function render(){
+  drawBackground();
+  drawTheater();
+  drawBoard();
+  drawFlyers();
+  if (G.space === 'b' || G.space === 's'){ placeGirl(); drawGirl(); }
+  setScreen();
+  // 盤の紙吹雪
+  setB(); drawParticles('b');
+  drawHint();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden){
+    running = false; if (raf) cancelAnimationFrame(raf); raf = 0;
+    if (AC && AC.state === 'running') AC.suspend().catch(()=>{});
+  } else {
+    running = true; last = 0;
+    if (AC && AC.state === 'suspended' && firstTouch) AC.resume().catch(()=>{});
+    if (!raf) raf = requestAnimationFrame(frame);
+  }
+});
+window.addEventListener('pagehide', () => { running = false; });
+window.addEventListener('pageshow', () => { if (!running){ running = true; last = 0; if (!raf) raf = requestAnimationFrame(frame); } });
+
+storeLoad();
+resize();
+raf = requestAnimationFrame(frame);
+
+/* 自動テスト用の読み取り口（画面には出ない） */
+window.__gf = {
+  state: () => ({ mode, busy, sq:G.sq, cos:G.cos, space:G.space, W:+WD.W.toFixed(3), S:+WD.S.toFixed(3), P:+WD.P.toFixed(3), awn:WD.awn, gate:WD.gate, star:+WD.star.toFixed(3),
+                  bridge:bridgeClass(), boatX:+WD.boatX.toFixed(1), sled:+WD.sledD.toFixed(3), dolls:DOLLS.map(d=>d.reg+':'+Math.round(d.x)), dicePress:dice.press, hint:hint.on,
+                  rolls:journey.rolls, journeyN:journey.n, sel: sel ? sel.slots.join('') : null, pending: pending ? pending.o : null, shows:Store.shows.map(s=>s.o), store:Store.status, storeOk:Store.ok,
+                  particles:PS.length, frames, audio: AC ? AC.state : 'none', layout:{...L} }),
+  disc, errs: ERRS,
+  setSpeed: v => { SPEED = clamp(+v||1, 0.1, 8); },
+  pos: (k, a) => { // 対象のスクリーン座標
+    if (k === 'dice') return bToS(DICE.x, DICE.y);
+    if (k === 'med') return bToS(MEDS[a][0], MEDS[a][1]);
+    if (k === 'slot') return bToS(SLOTS[a][0], SLOTS[a][1]);
+    if (k === 'gal') return bToS(GAL[a][0], GAL[a][1]);
+    if (k === 'boat') return tToS(WD.boatX, WD.boatY-10);
+    if (k === 'bg') return [L.portrait ? W*0.5 : W*0.5, SA.t + 3];
+    return null;
+  }
+};
+})();
+</script>
+</body>
+</html>
