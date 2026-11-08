@@ -391,7 +391,7 @@ function drawTownBG(){
   ln(-sh.w*0.35,S*0.16,-sh.w*0.2,0,lw);ln(sh.w*0.35,S*0.16,sh.w*0.2,0,lw);
   if(ST.saved&&mdl.state!=='fly'){drawModel(0,-S*0.01,sh.w*0.8,true);}
   else{ // empty spot marker
-    cx.save();cx.setLineDash([lw*1.5,lw*1.5]);rct(-sh.w*0.3,-S*0.22,sh.w*0.6,S*0.2,null);cx.setLineDash([]);cx.restore();}
+    cx.save();cx.setLineDash([lw*1.5,lw*1.5]);{const dh=Math.min(S*0.2,34);rct(-sh.w*0.3,-dh-2,sh.w*0.6,dh,null);}cx.setLineDash([]);cx.restore();}
   cx.restore();
   // lots (sun patches)
   for(let i=0;i<LOTS;i++){if(houseAt(i))continue;const p=lotXY(i);const w=wigOf({wig:deco.lots[i]});
@@ -864,7 +864,7 @@ function runDoll(d,dt){
   if(d.jump<0||d.jv){d.jv+=S*9*dt;d.jump+=d.jv*dt;if(d.jump>=0){d.jump=0;d.jv=0;}}
   if(!d.arrived||d.drag)return;
   const a=d.q[0];
-  if(!a){if(d.pose!=='stand'){d.pose='stand';}idleAI(d,dt);return;}
+  if(!a){if(d.pose!=='stand'){d.pose='stand';}if(d.jobPending)d.jobPending=false;idleAI(d,dt);return;}
   if(a.k==='walk'){
     const p=resolve(a.tgt);const dx=p.x-d.x,dy=p.y-d.y,dist=Math.hypot(dx,dy);
     const sp=D*1.5*gaitSpeed(d)*(a.opt.fast?1.6:1);
