@@ -1,0 +1,1440 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#ffffff">
+<title>とことこ、ぱたん！おきがえから生まれる小さなおうち</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#ffffff;overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+#sa{position:fixed;left:0;top:0;right:0;bottom:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);visibility:hidden;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="sa"></div>
+<script>
+'use strict';
+(function(){
+// =====================================================================
+//  basics / palette (primaries only)
+// =====================================================================
+const C={R:'#e2342b',B:'#2257b8',Y:'#f7c51a',K:'#141414',W:'#ffffff'};
+const COLS={R:C.R,B:C.B,Y:C.Y,K:C.K};
+const cv=document.getElementById('c'), sa=document.getElementById('sa');
+const cx=cv.getContext('2d');
+const QS=new URLSearchParams(location.search);
+let seed=QS.has('seed')?((parseInt(QS.get('seed'),10)||1)>>>0):((Date.now()^0x9e3779b9)>>>0);
+function rng(){seed=(seed+0x6D2B79F5)|0;let t=Math.imul(seed^(seed>>>15),1|seed);t=(t+Math.imul(t^(t>>>7),61|t))^t;return((t^(t>>>14))>>>0)/4294967296;}
+function pick(a){return a[Math.floor(rng()*a.length)];}
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+const easeOut=t=>1-(1-t)*(1-t);
+const easeIO=t=>t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+const backOut=t=>{const c1=1.9,c3=c1+1;return 1+c3*Math.pow(t-1,3)+c1*Math.pow(t-1,2);};
+const SAVE_KEY='tokotoko-patan-town';
+const LOTS=6;
+const ITEM_KEYS=['desk','seat','chair','deck','benchdeck','shelfdeck','cloth','toybox','stored'];
+const GTYPES=['jacket','cape','vest'];
+const PITCH={cape:1.3,jacket:1.0,vest:0.8,block:1.15};
+
+// =====================================================================
+//  audio (Web Audio synth, started on first touch; never awaited)
+// =====================================================================
+let AC=null,MG=null,NB=null;
+function audioStart(){
+  try{
+    if(!AC){const K=window.AudioContext||window.webkitAudioContext;if(!K)return;AC=new K();MG=AC.createGain();MG.gain.value=0.5;MG.connect(AC.destination);
+      NB=AC.createBuffer(1,Math.floor(AC.sampleRate*0.6),AC.sampleRate);const ch=NB.getChannelData(0);for(let i=0;i<ch.length;i++)ch[i]=Math.random()*2-1;}
+    if(AC.state==='suspended'){const p=AC.resume();if(p&&p.catch)p.catch(()=>{});}
+  }catch(e){AC=null;}
+}
+function tn(f,dur,type,vol,f2,delay){
+  if(!AC)return;try{const t=AC.currentTime+(delay||0);const o=AC.createOscillator(),g=AC.createGain();o.type=type||'sine';o.frequency.setValueAtTime(f,t);if(f2)o.frequency.exponentialRampToValueAtTime(f2,t+dur);
+  g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol||0.2,t+0.008);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);o.connect(g);g.connect(MG);o.start(t);o.stop(t+dur+0.03);}catch(e){}
+}
+function nz(dur,vol,freq,q,delay,type){
+  if(!AC||!NB)return;try{const t=AC.currentTime+(delay||0);const s=AC.createBufferSource();s.buffer=NB;const fl=AC.createBiquadFilter();fl.type=type||'bandpass';fl.frequency.value=freq;fl.Q.value=q||1;const g=AC.createGain();
+  g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol,t+0.005);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);s.connect(fl);fl.connect(g);g.connect(MG);s.start(t,Math.random()*0.3,dur+0.05);}catch(e){}
+}
+const SND={
+  pick:p=>{tn(480*p,0.09,'triangle',0.22,760*p);nz(0.04,0.1,2600*p,2);},
+  flap:p=>{nz(0.035,0.14,1700*p,3);nz(0.035,0.11,2300*p,3,0.07);},
+  pon:p=>{tn(300*p,0.16,'sine',0.35,640*p);tn(960*p,0.08,'triangle',0.1,null,0.03);},
+  step:p=>{tn(150*p,0.05,'sine',0.1,105*p);nz(0.025,0.04,800*p,2);},
+  katan:p=>{nz(0.05,0.28,1150*p,4);tn(250*p,0.07,'square',0.07,180*p);nz(0.05,0.24,700*p,4,0.09);tn(185*p,0.08,'square',0.06,140*p,0.09);},
+  clap:()=>{for(let i=0;i<4;i++)nz(0.04,0.2,2400,1.2,i*0.14+Math.random()*0.03,'highpass');},
+  chime:()=>{[523,659,784,1047].forEach((f,i)=>tn(f,0.28,'triangle',0.18,null,i*0.08));},
+  wig:()=>{tn(240,0.09,'sine',0.1,190);},
+  learn:()=>{tn(660,0.12,'sine',0.18);tn(990,0.18,'sine',0.18,null,0.1);},
+  door:()=>{nz(0.12,0.18,500,1.5);tn(150,0.15,'triangle',0.14,95);},
+  whoosh:p=>{nz(0.35,0.16,600*p,0.8);tn(300*p,0.3,'sine',0.06,600*p);},
+  boing:()=>{tn(320,0.22,'sine',0.18,150);},
+  note:i=>{tn([523,587,659,784,880,1047,1175][i%7],0.18,'triangle',0.18);},
+  sit:()=>{tn(260,0.1,'sine',0.16,200);},
+};
+
+// =====================================================================
+//  layout
+// =====================================================================
+let W=0,H=0,DPR=1,TH=0,HW=0,S=100,D=58,LW=3,PORT=false;
+const ins={t:0,r:0,b:0,l:0};
+const LY={lots:[],streetY:0,lotTop:0,cw:0,ch:0,left:0,right:0,rack:{},box:{x:0,y:0},mbase:{x:0,y:0},shelf:{x:0,y:0,w:0},sun:{x:0,y:0,r:0},cloud:{x:0,y:0,r:0},gs:80};
+function readInsets(){try{const s=getComputedStyle(sa);ins.t=parseFloat(s.paddingTop)||0;ins.r=parseFloat(s.paddingRight)||0;ins.b=parseFloat(s.paddingBottom)||0;ins.l=parseFloat(s.paddingLeft)||0;}catch(e){}}
+function layout(){
+  const oW=W,oTH=TH;
+  W=Math.max(200,window.innerWidth);H=Math.max(200,window.innerHeight);DPR=Math.min(2,window.devicePixelRatio||1);
+  cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
+  readInsets();
+  PORT=H>W;
+  HW=Math.min(Math.max(H*(PORT?0.2:0.23),118),220)+ins.b;
+  TH=H-HW;
+  const Hs=Math.max(H*0.085,52)+ins.t, Hst=H*0.1;
+  const cols=PORT?2:3, rows=PORT?3:2;
+  const left=ins.l+6,right=W-ins.r-6;
+  const lotTop=Hs,lotBot=TH-Hst;
+  const cw=(right-left)/cols,ch=(lotBot-lotTop)/rows;
+  S=Math.min(cw*(PORT?0.78:0.7),ch*0.84);D=S*0.58;LW=Math.max(2.5,S*0.032);
+  LY.left=left;LY.right=right;LY.cw=cw;LY.ch=ch;LY.lotTop=lotTop;
+  LY.lots=[];
+  for(let i=0;i<LOTS;i++){const c=i%3,r=Math.floor(i/3);const col=PORT?r:c,row=PORT?c:r;
+    LY.lots.push({x:left+(col+0.5)*cw,y:lotTop+(row+0.9)*ch});}
+  LY.streetY=TH-Hst*0.28;
+  LY.gs=Math.min((HW-ins.b)*0.56,W*0.25);
+  const span=Math.min(W*0.3,LY.gs*2.6);
+  const ry=TH+(HW-ins.b)*0.6;
+  LY.rack={jacket:{x:W/2-span,y:ry},cape:{x:W/2,y:ry},vest:{x:W/2+span,y:ry},rodY:TH+(HW-ins.b)*0.14};
+  LY.box={x:left+Math.max(S*0.42,40),y:LY.streetY};
+  LY.mbase={x:right-Math.max(S*0.42,40),y:LY.streetY};
+  LY.shelf={x:right-Math.max(S*0.62,62),y:ins.t+Math.max(H*0.085,52)*0.7,w:Math.max(S*0.95,92)};
+  LY.sun={x:left+Math.max(S*0.35,36),y:ins.t+Math.max(H*0.085,52)*0.5,r:Math.max(S*0.15,17)};
+  LY.cloud={x:W*(PORT?0.45:0.3),y:ins.t+Math.max(H*0.085,52)*0.45,r:Math.max(S*0.1,12)};
+  if(oW&&oTH&&dolls.length){for(const d of dolls){d.x*=W/oW;d.y*=TH/oTH;if(d.restLot!=null&&!d.q.length){const p=lotXY(d.restLot);d.x=p.x+(d.restDx||0)*S;d.y=p.y+(d.restDy||0)*S;}}}
+  for(const k of GTYPES){const g=GR[k];if(g&&!g.drag&&g.on<0){g.x=LY.rack[k].x;g.y=LY.rack[k].y;}}
+  blk.x=LY.box.x;blk.y=LY.box.y-S*0.22;
+  layoutInterior();
+}
+function lotXY(i){return LY.lots[i]||{x:W/2,y:TH/2};}
+function neighbors(a,b){const ac=a%3,ar=Math.floor(a/3),bc=b%3,br=Math.floor(b/3);return Math.abs(ac-bc)+Math.abs(ar-br)===1;}
+
+// =====================================================================
+//  state
+// =====================================================================
+function mkDollData(id,col,arrived){return{id,col,arrived,garment:null,pocket:null,learned:{sit:false,carry:false},last:null,home:-1,fx:0.5,fy:0.9};}
+function mkHouse(lot,kind){const it={};for(const k of ITEM_KEYS)it[k]=0;return{id:0,lot,kind,roof:false,room:false,shed:false,rest:false,bench:false,items:it,made:{cape:false,jacket:false,vest:false},owner:-1};}
+function newState(){
+  return{v:2,rev:0,savedRev:-1,saved:false,houses:[],nextHid:1,bench:1,corridors:[],trips:{},
+    garments:{cape:{owner:-1,homes:[]},jacket:{owner:-1,homes:[]},vest:{owner:-1,homes:[]}},
+    dolls:[mkDollData(0,'R',true),mkDollData(1,'B',false),mkDollData(2,'K',false)],
+    flags:{worn:{cape:0,jacket:0,vest:0},enteredAny:0,entered:{},pocketHand:0,dressed:{0:0,1:0,2:0},shared:0,stopby:0,delivered:{},chairs:0,shedBuilt:0,ceilCloth:0}};
+}
+let ST=newState();
+let active=0;
+const dolls=[];
+const GR={};
+for(const k of GTYPES)GR[k]={type:k,x:0,y:0,on:-1,drag:false,sel:false,sq:0,sqv:0,fold:0,lift:0,str:0,ang:0,vx:0,vy:0,wig:0,hideT:0};
+const blk={x:0,y:0,state:'box',t:0,refill:0,wig:0};
+const mdl={x:0,y:0,state:'base',t:0,wig:0,fx0:0,fy0:0};
+const parts=[],ghosts=[],timers=[],trail=[];
+let view='town',trans=null,inside=null;
+let now=0,lastInput=0,demo=null,demoShown=false,hint=null;
+let ptr=null; // single active pointer
+function later(t,f){timers.push({t,f});}
+function houseAt(lot){for(const h of ST.houses)if(h.lot===lot)return h;return null;}
+function houseById(id){for(const h of ST.houses)if(h.id===id)return h;return null;}
+function bump(){ST.rev++;}
+function gestureOf(h){return(h.kind==='roof'||h.kind==='rest')?'sit':'carry';}
+function emptyLots(){const r=[];for(let i=0;i<LOTS;i++)if(!houseAt(i))r.push(i);return r;}
+
+function mkDollRT(data){
+  return Object.assign(data,{x:0,y:0,q:[],pose:'stand',poseT:0,poseOpt:{},face:1,walkPh:0,walking:false,jump:0,jv:0,drag:false,idleT:3+data.id*2,touchT:-99,jobPending:false,hand:null,restLot:null,restDx:0,restDy:0,atLot:-1,hideG:false,sqz:0,wav:0,reachAt:null,stepC:0});
+}
+function initDolls(){
+  dolls.length=0;
+  for(const d of ST.dolls){const r=mkDollRT(d);dolls.push(r);}
+  ST.dolls=dolls;
+}
+
+// =====================================================================
+//  particles / ghosts
+// =====================================================================
+const PMAX=90;
+function burst(x,y,n,cols,sp){
+  for(let i=0;i<n;i++){if(parts.length>=PMAX)parts.shift();const a=rng()*Math.PI*2,v=(0.4+rng()*0.8)*(sp||1)*S*2.2;
+    parts.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-S*1.2,r:rng()*6,vr:(rng()-0.5)*12,s:S*(0.035+rng()*0.035),life:0,max:0.7+rng()*0.6,c:(cols||['R','B','Y'])[i%(cols||['R','B','Y']).length],tri:rng()<0.5});}
+}
+function ghost(o){ghosts.push(Object.assign({t:0,dur:0.5,arc:0.3,s0:1,s1:1,flip:false},o));}
+
+// =====================================================================
+//  draw primitives
+// =====================================================================
+let lw=3;
+function path(pts){cx.beginPath();cx.moveTo(pts[0],pts[1]);for(let i=2;i<pts.length;i+=2)cx.lineTo(pts[i],pts[i+1]);cx.closePath();}
+function poly(pts,fill){path(pts);if(fill){cx.fillStyle=fill;cx.fill();}cx.lineWidth=lw;cx.strokeStyle=C.K;cx.stroke();}
+function rct(x,y,w,h,fill){cx.beginPath();cx.rect(x,y,w,h);if(fill){cx.fillStyle=fill;cx.fill();}cx.lineWidth=lw;cx.strokeStyle=C.K;cx.stroke();}
+function circ(x,y,r,fill){cx.beginPath();cx.arc(x,y,Math.max(0.5,r),0,Math.PI*2);if(fill){cx.fillStyle=fill;cx.fill();}cx.lineWidth=lw;cx.strokeStyle=C.K;cx.stroke();}
+function ln(x1,y1,x2,y2,w){cx.beginPath();cx.moveTo(x1,y1);cx.lineTo(x2,y2);cx.lineWidth=w||lw;cx.strokeStyle=C.K;cx.stroke();}
+function reflect(px,py,ax,ay,bx,by){const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;const t=((px-ax)*dx+(py-ay)*dy)/l2;const qx=ax+t*dx,qy=ay+t*dy;return[2*qx-px,2*qy-py];}
+
+// ---------- garments (local, centered) ----------
+function gCape(s,f,flap){
+  const ax=0,ay=-s*0.5,lx=-s*0.5,ly=s*0.42,rx=s*0.5,ry=s*0.42;
+  const k=clamp(0.14+0.24*f+0.07*flap,0.05,0.5);
+  const p1x=lerp(rx,ax,k*1.25),p1y=lerp(ry,ay,k*1.25),p2x=lerp(rx,lx,k),p2y=ry;
+  poly([ax,ay,p1x,p1y,p2x,p2y,lx,ly],C.B);
+  ln(ax,ay+s*0.12,-s*0.06,ly,lw*0.7);
+  const rf=reflect(rx,ry,p1x,p1y,p2x,p2y);
+  poly([p1x,p1y,rf[0],rf[1],p2x,p2y],C.W);
+  circ(0,ay+s*0.03,s*0.06,C.R);
+}
+function gJacket(s,f){
+  poly([-s*0.34,-s*0.38,-s*0.6,s*0.18,-s*0.44,s*0.26,-s*0.28,-s*0.02],C.W);
+  poly([s*0.34,-s*0.38,s*0.6,s*0.18,s*0.44,s*0.26,s*0.28,-s*0.02],C.W);
+  rct(-s*0.36,-s*0.4,s*0.72,s*0.82,C.W);
+  ln(s*0.05,-s*0.02,s*0.05,s*0.42,lw*0.8);
+  poly([-s*0.2,-s*0.4,0,-s*0.02,-s*0.05,-s*0.4],C.W);
+  poly([s*0.2,-s*0.4,0,-s*0.02,s*0.05,-s*0.4],C.W);
+  const fl=f*s*0.14;
+  poly([-s*0.2,-s*0.4,-s*0.34-fl,-s*0.24-fl*0.4,-s*0.12,-s*0.24],C.W);
+  poly([s*0.2,-s*0.4,s*0.34+fl*0.3,-s*0.24,s*0.12,-s*0.24],C.W);
+  circ(s*0.13,s*0.1,s*0.045,C.R);circ(s*0.13,s*0.27,s*0.045,C.R);
+}
+function gVest(s,f,blockIn){
+  poly([-s*0.36,-s*0.4,-s*0.14,-s*0.4,0,-s*0.06,s*0.14,-s*0.4,s*0.36,-s*0.4,s*0.4,s*0.42,-s*0.4,s*0.42],C.Y);
+  if(blockIn){poly([-s*0.15,s*0.12,s*0.05,s*0.08,s*0.09,-s*0.12,-s*0.11,-s*0.08],C.Y);}
+  rct(-s*0.27,s*0.06,s*0.54,s*0.32,C.R);
+  const fy=f*s*0.13;
+  poly([-s*0.3,s*0.05-fy,s*0.3,s*0.05-fy,s*0.24,s*0.16-fy*0.6,-s*0.24,s*0.16-fy*0.6],C.R);
+}
+function drawGarmentLocal(type,s,f,flap,blockIn){if(type==='cape')gCape(s,f,flap);else if(type==='jacket')gJacket(s,f);else gVest(s,f,blockIn);}
+
+// ---------- block ----------
+function drawBlock(x,y,s){rct(x-s/2,y-s/2,s,s,C.Y);ln(x-s/2,y-s*0.15,x+s/2,y-s*0.15,lw*0.6);}
+
+// ---------- items (bottom center x,y, unit s) ----------
+function drawItem(t,x,y,s,opt){
+  opt=opt||{};
+  if(t==='bench'){rct(x-s*0.55,y-s*0.72,s*1.1,s*0.14,C.R);ln(x-s*0.42,y-s*0.58,x-s*0.42,y-s*0.42);ln(x+s*0.42,y-s*0.58,x+s*0.42,y-s*0.42);rct(x-s*0.55,y-s*0.42,s*1.1,s*0.14,C.R);ln(x-s*0.45,y-s*0.28,x-s*0.5,y);ln(x+s*0.45,y-s*0.28,x+s*0.5,y);}
+  else if(t==='desk'){rct(x-s*0.5,y-s*0.62,s*1.0,s*0.14,C.Y);ln(x-s*0.17,y-s*0.62,x-s*0.17,y-s*0.48,lw*0.6);ln(x+s*0.17,y-s*0.62,x+s*0.17,y-s*0.48,lw*0.6);rct(x-s*0.44,y-s*0.48,s*0.13,s*0.48,C.Y);rct(x+s*0.31,y-s*0.48,s*0.13,s*0.48,C.Y);
+    const st=opt.stack||0;for(let i=0;i<st;i++)drawBlock(x-s*0.15+(i%2)*s*0.3*0,y-s*0.62-s*0.12-i*s*0.22,s*0.22);}
+  else if(t==='seat'){rct(x-s*0.24,y-s*0.42,s*0.48,s*0.42,C.Y);ln(x-s*0.24,y-s*0.3,x+s*0.24,y-s*0.3,lw*0.6);}
+  else if(t==='chair'){rct(x-s*0.24,y-s*0.86,s*0.1,s*0.5,C.R);rct(x-s*0.26,y-s*0.42,s*0.52,s*0.1,C.R);ln(x-s*0.2,y-s*0.32,x-s*0.22,y);ln(x+s*0.2,y-s*0.32,x+s*0.22,y);}
+  else if(t==='deck'||t==='benchdeck'){if(t==='benchdeck'){poly([x-s*0.5,y-s*0.3,x-s*0.5,y-s*0.7,x-s*0.2,y-s*0.3],C.W);poly([x+s*0.5,y-s*0.3,x+s*0.5,y-s*0.7,x+s*0.2,y-s*0.3],C.W);}
+    rct(x-s*0.55,y-s*0.3,s*1.1,s*0.3,C.W);ln(x-s*0.3,y-s*0.3,x,y-s*0.05,lw*0.7);ln(x+s*0.3,y-s*0.3,x,y-s*0.05,lw*0.7);circ(x+s*0.38,y-s*0.15,s*0.05,C.R);}
+  else if(t==='shelfdeck'){ln(x-s*0.4,y-s*0.45,x-s*0.4,y);ln(x+s*0.4,y-s*0.45,x+s*0.4,y);rct(x-s*0.55,y-s*0.6,s*1.1,s*0.16,C.W);ln(x-s*0.3,y-s*0.6,x,y-s*0.44,lw*0.6);ln(x+s*0.3,y-s*0.6,x,y-s*0.44,lw*0.6);drawBlock(x,y-s*0.6-s*0.15,s*0.28);}
+  else if(t==='toybox'){rct(x-s*0.36,y-s*0.6,s*0.72,s*0.6,C.Y);rct(x-s*0.22,y-s*0.42,s*0.44,s*0.3,C.R);poly([x-s*0.25,y-s*0.44,x+s*0.25,y-s*0.44,x+s*0.2,y-s*0.34,x-s*0.2,y-s*0.34],C.R);}
+  else if(t==='stored'){const n=Math.min(4,opt.n||1);const bs=s*0.3;const pos=[[0,0],[1,0],[0.5,1],[-1,0]];for(let i=0;i<n;i++){const p=pos[i];drawBlock(x+p[0]*bs*1.02-bs*0.5+bs*0.5,y-bs*0.5-p[1]*bs,bs);}}
+}
+const SEATS={bench:1,seat:1,chair:1,deck:1,benchdeck:1};
+function itemList(h){
+  const L=[];if(h.bench)L.push('bench');
+  const caps={desk:2,seat:2,benchdeck:2,shelfdeck:2,deck:2,chair:4,toybox:1};
+  for(const k of ['desk','seat','benchdeck','shelfdeck','deck','chair','toybox'])for(let i=0;i<Math.min(caps[k],h.items[k]);i++)L.push(k);
+  return L.slice(0,7);
+}
+function townItemPos(h){
+  const L=itemList(h),n=L.length,res=[];if(!n)return res;
+  const sp=Math.min(0.26,1.1/n);
+  for(let i=0;i<n;i++)res.push({t:L[i],dx:(i-(n-1)/2)*sp});
+  return res;
+}
+function seatSpots(h){return townItemPos(h).filter(o=>SEATS[o.t]);}
+
+// =====================================================================
+//  doll drawing
+// =====================================================================
+function armTri(sx,sy,a,len,w,fill){const tx=sx+Math.sin(a)*len,ty=sy+Math.cos(a)*len;const px=Math.cos(a)*w*0.5,py=-Math.sin(a)*w*0.5;poly([sx-px,sy-py,sx+px,sy+py,tx,ty],fill);return[tx,ty];}
+function drawDoll(d,x,y,s,optPose){
+  const pose=optPose||d.pose,t=now+d.id*0.7,face=d.face||1;
+  const bw=s*0.36,bh=s*0.34;
+  let hip=-s*0.3,legA=[0,0],arm=[-0.3,0.3],jy=d.jump||0;
+  const g=d.hideG?null:d.garment;
+  const gait=g||'none';
+  if(pose==='walk'){
+    const ph=d.walkPh,sw=Math.sin(ph);
+    if(gait==='cape'){legA=[sw*0.45,-sw*0.45];arm=[-1.35-0.35*Math.sin(ph*2),1.35+0.35*Math.sin(ph*2)];jy-=Math.abs(Math.sin(ph))*s*0.09;}
+    else if(gait==='jacket'){legA=[sw*0.25,-sw*0.25];arm=[-0.18+sw*0.15,0.18+sw*0.15];jy-=Math.abs(Math.sin(ph))*s*0.025;}
+    else if(gait==='vest'){legA=[sw*0.6,-sw*0.6];arm=[-0.4+sw*0.7,0.4+sw*0.7];jy-=Math.abs(Math.sin(ph))*s*0.04;}
+    else{legA=[sw*0.4,-sw*0.4];arm=[-0.3+sw*0.5,0.3+sw*0.5];jy-=Math.abs(Math.sin(ph))*s*0.04;}
+    if(d.hand)arm=[face*1.5,face*1.5];
+  }else if(pose==='sit'){hip=-s*(d.poseOpt.seatH!=null?d.poseOpt.seatH:0.16);legA=[face*1.45,face*1.25];arm=[face*0.7,face*0.9];}
+  else if(pose==='wave'){arm=face>0?[-0.3,2.5+0.45*Math.sin(t*11)]:[-2.5-0.45*Math.sin(t*11),0.3];}
+  else if(pose==='clap'){const c=Math.abs(Math.sin(t*9));arm=[-2.0-0.6*c+0.6,2.0+0.6*c-0.6];jy-=c*s*0.03;}
+  else if(pose==='cheer'){arm=[-2.6,2.6];jy-=Math.abs(Math.sin(t*8))*s*0.08;}
+  else if(pose==='carry'){arm=[face*1.45,face*1.45];jy-=Math.abs(Math.sin(t*6))*s*0.02;}
+  else if(pose==='pocket'){arm=[-0.3,-0.55];}
+  else if(pose==='fold'){arm=[-2.2+0.7*Math.sin(t*14),2.2-0.7*Math.sin(t*14)];}
+  else if(pose==='think'){arm=[-0.3,0.3];}
+  else if(pose==='shake'){arm=[-0.6,0.6];}
+  else if(pose==='hang'){arm=[-2.8,2.8];legA=[0.2*Math.sin(t*6),-0.2*Math.sin(t*6)];}
+  else if(pose==='reach'&&d.reachAt){const a=Math.atan2(d.reachAt.x-(x+bw*0.5),d.reachAt.y-(y+hip-bh));arm=[-0.3,clamp(a,-3,3)];}
+  else if(pose==='stand'&&d.reachAt){let a=Math.atan2(d.reachAt.x-x,d.reachAt.y-(y+hip-bh));if(Math.abs(a)<1.0)a=(a>=0?1:-1)*(1.0+0.25*Math.sin(t*5));arm=a>0?[-0.3,clamp(a,-3,3)]:[clamp(a,-3,3),0.3];jy-=Math.abs(Math.sin(t*5))*s*0.03;}
+  else{const b=Math.sin(t*1.6)*0.05;arm=[-0.3-b,0.3+b];}
+  if(d.hand&&pose!=='walk')arm=[face*1.45,face*1.45];
+  const lean=pose==='walk'?face*0.06:(pose==='shake'?Math.sin(t*16)*0.12:0);
+  const sq=1+(d.sqz||0);
+  cx.save();cx.translate(x,y+jy);cx.scale(1/sq,sq);cx.rotate(lean);
+  // legs
+  const legLen=s*0.3,lgw=s*0.12;
+  armTri(-bw*0.25,hip,legA[0],legLen,lgw,C.K);armTri(bw*0.25,hip,legA[1],legLen,lgw,C.K);
+  // body
+  const bTop=hip-bh;
+  rct(-bw/2,bTop,bw,bh,COLS[d.col]);
+  const sleeve=g==='jacket'?C.W:COLS[d.col];
+  // garment
+  if(g==='cape'){cx.save();cx.translate(0,bTop+s*0.62*0.5);gCape(s*0.62,0,pose==='walk'?Math.sin(d.walkPh*2):Math.sin(t*2)*0.3);cx.restore();}
+  else if(g==='jacket'){cx.save();cx.translate(0,bTop+bh*0.5);gJacket(s*0.5,0);cx.restore();}
+  else if(g==='vest'){cx.save();cx.translate(0,bTop+bh*0.5);gVest(s*0.46,pose==='pocket'?1:0,d.pocket==='block');cx.restore();}
+  // arms
+  const al=s*0.29,aw=s*0.1;
+  const hl=armTri(-bw/2+aw*0.3,bTop+aw*0.5,arm[0],al,aw,sleeve);
+  const hr=armTri(bw/2-aw*0.3,bTop+aw*0.5,arm[1],al,aw,sleeve);
+  if(d.hand==='block'){drawBlock((hl[0]+hr[0])/2,(hl[1]+hr[1])/2-s*0.06,s*0.2);}
+  // head
+  const hr2=s*0.14;
+  circ(0,bTop-s*0.02-hr2,hr2,C.W);
+  cx.restore();
+}
+
+// =====================================================================
+//  houses (town)
+// =====================================================================
+function houseRect(h){const p=lotXY(h.lot);return{x:p.x-S*0.55,y:p.y-S*1.08,w:S*1.1,h:S*1.25};}
+function drawRoofTri(x,baseY,w,hgt,anim,corner){
+  const k=0.18;const lx=x-w/2,rx=x+w/2,ay=baseY-hgt;
+  const p1x=lerp(rx,x,k*1.2),p1y=lerp(baseY,ay,k*1.2),p2x=lerp(rx,lx,k),p2y=baseY;
+  poly([x,ay,p1x,p1y,p2x,p2y,lx,baseY],C.B);
+  ln(x,ay+hgt*0.15,x-w*0.06,baseY,lw*0.7);
+  const rf=reflect(rx,baseY,p1x,p1y,p2x,p2y);
+  poly([p1x,p1y,rf[0],rf[1],p2x,p2y],C.W);
+}
+function drawHouse(h){
+  const p=lotXY(h.lot);const x=p.x,y=p.y;
+  const a=h.anim==null?1:h.anim;
+  const sy=a<1?backOut(clamp(a,0,1)):1;
+  const isHint=hint&&hint.kind==='house'&&hint.ref===h;
+  const hb=isHint?-Math.abs(Math.sin(now*4.5))*S*0.05:0;
+  const sq=h.squash||0;
+  cx.save();cx.translate(x,y);cx.scale(1+sq,(1-sq)*1);cx.translate(-x,-y+hb);
+  // ground line
+  ln(x-S*0.6,y,x+S*0.6,y,lw*1.2);
+  if(h.rest&&!h.room&&!h.roof&&!h.shed){rct(x-S*0.5,y-S*0.06,S*1.0,S*0.06,C.W);}
+  if(h.shed){
+    const sx=h.room?x-S*0.5:x,ss=h.room?0.75:1;
+    cx.save();cx.translate(sx,y);cx.scale(ss,ss*(h.kind==='shed'?sy:1));
+    rct(-S*0.28,-S*0.46,S*0.56,S*0.46,C.Y);
+    rct(-S*0.16,-S*0.3,S*0.32,S*0.3,C.R);
+    poly([-S*0.19,-S*0.32,S*0.19,-S*0.32,S*0.15,-S*0.24,-S*0.15,-S*0.24],C.R);
+    cx.restore();
+    const n=Math.min(4,h.items.stored);if(n)drawItem('stored',sx,y-S*0.46*ss,S*0.32,{n});
+  }
+  if(h.room){
+    const rs=h.kind==='room'?sy:1;
+    cx.save();cx.translate(x,y);cx.scale(1,rs);
+    rct(-S*0.36,-S*0.62,S*0.72,S*0.62,C.W);
+    ln(-S*0.36,-S*0.62,-S*0.1,-S*0.36,lw*0.8);ln(S*0.36,-S*0.62,S*0.1,-S*0.36,lw*0.8);
+    rct(-S*0.1,-S*0.36,S*0.2,S*0.36,C.R);
+    rct(-S*0.3,-S*0.3,S*0.13,S*0.13,C.B);
+    cx.restore();
+    if(h.roof){const rr=h.roofAnim==null?1:backOut(clamp(h.roofAnim,0,1));cx.save();cx.translate(x,y-S*0.62);cx.scale(1,rr);drawRoofTri(0,0,S*0.92,S*0.42);cx.restore();}
+  }else if(h.roof){
+    const rr=h.kind==='roof'?sy:(h.roofAnim==null?1:backOut(clamp(h.roofAnim,0,1)));
+    ln(x-S*0.38,y,x-S*0.38,y-S*0.58*rr,lw*1.4);ln(x+S*0.38,y,x+S*0.38,y-S*0.58*rr,lw*1.4);
+    cx.save();cx.translate(x,y-S*0.58*rr);cx.scale(1,rr);drawRoofTri(0,0,S*1.0,S*0.42);cx.restore();
+  }
+  if(h.items.cloth>0){const top=h.room?(h.roof?y-S*1.04:y-S*0.62):(h.roof?y-S*1.0:y-S*0.5);ln(x,top,x,top-S*0.16,lw);poly([x,top-S*0.16,x+S*0.16,top-S*0.11,x,top-S*0.06],C.B);}
+  cx.restore();
+}
+function drawHouseItems(h){
+  const p=lotXY(h.lot);
+  for(const o of townItemPos(h)){
+    let s=o.t==='bench'?S*0.42:S*0.34;let yy=p.y+S*0.02;
+    let pop=1;if(h.pop&&h.pop.t===o.t&&h.pop.a<1){pop=backOut(clamp(h.pop.a,0,1));}
+    cx.save();cx.translate(p.x+o.dx*S,yy);cx.scale(pop,pop);drawItem(o.t,0,0,s,{stack:o.t==='desk'?Math.min(2,(h.deskStack||0)):0});cx.restore();
+  }
+}
+function drawCorridor(a,b){
+  const pa=lotXY(a),pb=lotXY(b);
+  if(Math.abs(pa.y-pb.y)<S*0.3){const l=pa.x<pb.x?pa:pb,r=pa.x<pb.x?pb:pa;const y=l.y-S*0.42;const x1=l.x+S*0.36,x2=r.x-S*0.36;
+    ln(x1+S*0.1,y,x1+S*0.1,l.y,lw);ln(x2-S*0.1,y,x2-S*0.1,l.y,lw);
+    rct(x1,y-S*0.1,x2-x1,S*0.1,C.W);for(let i=1;i<6;i++){const xx=lerp(x1,x2,i/6);ln(xx,y-S*0.1,xx,y,lw*0.6);}
+    poly([x1,y-S*0.1,(x1+x2)/2,y-S*0.24,x2,y-S*0.1],C.R);
+  }else{const t=pa.y<pb.y?pa:pb,b2=pa.y<pb.y?pb:pa;const x=(t.x+b2.x)/2+S*0.45;const y1=t.y-S*0.1,y2=b2.y-S*0.5;
+    rct(x-S*0.08,y1,S*0.16,y2-y1,C.W);for(let i=1;i<6;i++){const yy=lerp(y1,y2,i/6);ln(x-S*0.08,yy,x+S*0.08,yy,lw*0.6);}
+    ln(t.x+S*0.36,y1,x-S*0.08,y1);ln(b2.x+S*0.36,y2,x-S*0.08,y2);}
+}
+
+// =====================================================================
+//  town scenery
+// =====================================================================
+function wigOf(o){return o&&o.wig>0?Math.sin(o.wig*40)*o.wig*0.6:0;}
+const deco={sun:{wig:0},cloud:{wig:0},bench:{wig:0},lots:[0,0,0,0,0,0],shelf:{wig:0}};
+function drawTownBG(){
+  cx.fillStyle=C.W;cx.fillRect(0,0,W,H);
+  lw=LW;
+  // sun
+  const su=LY.sun;cx.save();cx.translate(su.x,su.y);cx.rotate(wigOf(deco.sun)+now*0.15);
+  for(let i=0;i<8;i++){const a=i*Math.PI/4;poly([Math.cos(a-0.18)*su.r*1.25,Math.sin(a-0.18)*su.r*1.25,Math.cos(a)*su.r*1.75,Math.sin(a)*su.r*1.75,Math.cos(a+0.18)*su.r*1.25,Math.sin(a+0.18)*su.r*1.25],C.Y);}
+  circ(0,0,su.r,C.Y);cx.restore();
+  // cloud
+  const cl=LY.cloud;cx.save();cx.translate(cl.x+Math.sin(now*0.2)*S*0.2,cl.y);cx.rotate(wigOf(deco.cloud));
+  const cs=[[-1.1,0.2,0.7],[0,0,1],[1.1,0.2,0.75]];
+  cx.lineWidth=lw*2;cx.strokeStyle=C.K;for(const c of cs){cx.beginPath();cx.arc(c[0]*cl.r,c[1]*cl.r,c[2]*cl.r,0,7);cx.stroke();}
+  cx.fillStyle=C.W;for(const c of cs){cx.beginPath();cx.arc(c[0]*cl.r,c[1]*cl.r,c[2]*cl.r,0,7);cx.fill();}
+  cx.restore();
+  // shelf
+  const sh=LY.shelf;cx.save();cx.translate(sh.x,sh.y);cx.rotate(wigOf(deco.shelf)*0.3);
+  rct(-sh.w/2,0,sh.w,Math.max(6,S*0.05),C.K);ln(-sh.w*0.35,0,-sh.w*0.35,S*0.16,lw);ln(sh.w*0.35,0,sh.w*0.35,S*0.16,lw);
+  ln(-sh.w*0.35,S*0.16,-sh.w*0.2,0,lw);ln(sh.w*0.35,S*0.16,sh.w*0.2,0,lw);
+  if(ST.saved&&mdl.state!=='fly'){drawModel(0,-S*0.01,sh.w*0.8,true);}
+  else{ // empty spot marker
+    cx.save();cx.setLineDash([lw*1.5,lw*1.5]);rct(-sh.w*0.3,-S*0.22,sh.w*0.6,S*0.2,null);cx.setLineDash([]);cx.restore();}
+  cx.restore();
+  // lots (sun patches)
+  for(let i=0;i<LOTS;i++){if(houseAt(i))continue;const p=lotXY(i);const w=wigOf({wig:deco.lots[i]});
+    cx.save();cx.translate(p.x,p.y);cx.rotate(w*0.2);cx.beginPath();cx.ellipse(0,0,S*0.42,S*0.1,0,0,Math.PI*2);cx.fillStyle=C.Y;cx.fill();cx.lineWidth=lw;cx.strokeStyle=C.K;cx.stroke();cx.restore();
+    if(i===ST.bench){cx.save();cx.translate(p.x,p.y);cx.rotate(wigOf(deco.bench)*0.3);drawItem('bench',0,0,S*0.42);cx.restore();}
+  }
+  // corridors
+  for(const c of ST.corridors)drawCorridor(c[0],c[1]);
+  // block box
+  const bx=LY.box;rct(bx.x-S*0.22,bx.y-S*0.12,S*0.44,S*0.12,C.B);ln(bx.x-S*0.22,bx.y,bx.x+S*0.22,bx.y,lw*1.2);
+}
+function drawModel(x,y,w,onShelf){
+  // a tiny town board: houses as mini shapes
+  const h=w*0.32;cx.save();cx.translate(x,y);
+  rct(-w/2,-h*0.3,w,h*0.3,C.R);
+  const n=ST.houses.length;const cell=w/3.2;
+  for(const hs of ST.houses){const c=hs.lot%3,r=Math.floor(hs.lot/3);const xx=-w/2+cell*(c+0.6)+r*cell*0.1,yy=-h*0.3-r*h*0.08;const u=cell*0.5;
+    if(hs.room){rct(xx-u*0.4,yy-u*0.7,u*0.8,u*0.7,C.W);if(hs.roof)poly([xx-u*0.5,yy-u*0.7,xx,yy-u*1.15,xx+u*0.5,yy-u*0.7],C.B);}
+    else if(hs.roof){poly([xx-u*0.55,yy-u*0.45,xx,yy-u*0.95,xx+u*0.55,yy-u*0.45],C.B);ln(xx-u*0.4,yy-u*0.45,xx-u*0.4,yy);ln(xx+u*0.4,yy-u*0.45,xx+u*0.4,yy);}
+    else if(hs.shed){rct(xx-u*0.35,yy-u*0.5,u*0.7,u*0.5,C.Y);}
+    else rct(xx-u*0.5,yy-u*0.15,u,u*0.15,C.R);
+  }
+  if(!n){rct(-w*0.1,-h*0.6,w*0.2,h*0.3,C.W);}
+  cx.restore();
+}
+
+// =====================================================================
+//  rack / wardrobe
+// =====================================================================
+function rackSize(k){return k==='cape'?LY.gs*1.2:LY.gs*0.92;}
+function drawWardrobe(){
+  lw=LW;
+  ln(0,TH,W,TH,lw*1.6);
+  ln(Math.max(0,LY.rack.jacket.x-LY.gs*0.8),LY.rack.rodY,Math.min(W,LY.rack.vest.x+LY.gs*0.8),LY.rack.rodY,lw*1.6);
+  for(const k of GTYPES){const r=LY.rack[k];const s=rackSize(k);ln(r.x,LY.rack.rodY,r.x,r.y-s*0.5,lw);
+    cx.beginPath();cx.arc(r.x,LY.rack.rodY-lw*1.5,lw*2.2,Math.PI,0);cx.lineWidth=lw;cx.strokeStyle=C.K;cx.stroke();}
+}
+function drawGarmentFree(k){
+  const g=GR[k];if(g.on>=0&&!g.drag)return;if(g.hideT>0)return;
+  const s=rackSize(k);
+  let x=g.x,y=g.y-g.lift;
+  const isHint=hint&&hint.kind==='garment'&&hint.ref===k&&!g.drag&&!g.sel;
+  if(isHint)y-=Math.abs(Math.sin(now*5))*s*0.08;
+  const wg=wigOf(g);
+  cx.save();cx.translate(x,y);
+  cx.rotate(g.ang*0+wg*0.4+(g.sel&&!g.drag?Math.sin(now*6)*0.06:0));
+  const sq=g.sq;
+  if(g.str>0.01){cx.rotate(g.ang);cx.scale(1+g.str,1-g.str*0.45);cx.rotate(-g.ang);}
+  cx.scale(1-sq*0.5,1+sq);
+  if(k==='vest'&&g.drag)cx.scale(1,1);
+  let flap=0;if(k==='cape'){flap=isHint?Math.sin(now*9)*1.2:Math.sin(now*2.2)*0.4;}
+  drawGarmentLocal(k,s,g.fold,flap,false);
+  cx.restore();
+}
+
+// =====================================================================
+//  interior
+// =====================================================================
+let IL={floor:0,ceil:0,door:{},side:{},DI:80,I:60,slots:[]};
+function layoutInterior(){
+  IL.DI=Math.min(W,H)*(PORT?0.28:0.22);IL.I=Math.min(W,H)*(PORT?0.22:0.17);
+  IL.floor=PORT?H*0.74:H*0.8;IL.ceil=ins.t+H*0.08;
+  const dw=Math.max(W*0.13,74),dh=Math.max(IL.DI*1.35,120);
+  IL.door={x:ins.l+W*0.03,y:IL.floor-dh,w:dw,h:dh};
+  IL.side={x:W-ins.r-W*0.03-dw,y:IL.floor-dh,w:dw,h:dh};
+}
+function interiorItems(h){
+  const L=itemList(h).slice();
+  if(h.items.stored>0)L.push('stored');
+  return L.slice(0,PORT?4:6);
+}
+function interiorSlots(h){
+  const L=interiorItems(h);const n=L.length;const res=[];
+  const x0=IL.door.x+IL.door.w+W*0.06,x1=(inside&&inside.side?IL.side.x-W*0.04:W-ins.r-W*0.04);
+  const I=Math.min(IL.I,(x1-x0)/Math.max(1,n)*0.82);
+  for(let i=0;i<n;i++)res.push({t:L[i],x:lerp(x0,x1,(i+0.5)/n),y:IL.floor,s:I,i});
+  return res;
+}
+function drawInterior(){
+  const h=inside.h;lw=Math.max(3,IL.DI*0.035);
+  cx.fillStyle=C.W;cx.fillRect(0,0,W,H);
+  // walls: ceiling shape depends on house
+  const cy=IL.ceil;
+  if(h.roof){poly([0,cy+H*0.16,W/2,cy-H*0.02,W,cy+H*0.16],null);ln(W/2,cy-H*0.02,W/2,cy+H*0.1,lw*0.7);}
+  else if(h.room){ln(0,cy+H*0.08,W,cy+H*0.08,lw*1.4);ln(0,cy+H*0.08,W*0.22,cy+H*0.28,lw*0.8);ln(W,cy+H*0.08,W*0.78,cy+H*0.28,lw*0.8);}
+  else{ln(0,cy+H*0.1,W,cy+H*0.1,lw*1.4);}
+  // window
+  const ww=Math.min(W,H)*0.2;const wx=W*0.5,wy=cy+H*(PORT?0.33:0.24);cx.save();cx.translate(wx,wy);cx.rotate(wigOf(inside.win)*0.2);
+  rct(-ww/2,-ww/2,ww,ww,C.B);ln(0,-ww/2,0,ww/2);ln(-ww/2,0,ww/2,0);cx.restore();
+  // floor + rug
+  ln(0,IL.floor,W,IL.floor,lw*1.6);
+  {const rx=IL.door.x+IL.door.w+W*0.03,rw=W-ins.r-W*0.03-rx,ry=IL.floor,rh=Math.min((H-IL.floor)*0.4,H*0.09);rct(rx,ry,rw,rh,h.roof?C.B:h.room?C.R:C.Y);ln(rx+rw*0.5,ry,rx+rw*0.5,ry+rh,lw*0.7);}
+  if(hint&&!demo){const hp=hintPoint(hint);if(hp)drawRays(hp.x,hp.y,hp.r);}
+  // doors
+  const isHintDoor=hint&&hint.kind==='door';
+  const dr=IL.door;const db=isHintDoor?-Math.abs(Math.sin(now*5))*dr.h*0.04:0;const op=inside.doorOpen||0;
+  rct(dr.x,dr.y+db,dr.w*(1-op*0.7),dr.h,C.R);circ(dr.x+dr.w*(1-op*0.7)*0.78,dr.y+db+dr.h*0.55,dr.w*0.07,C.K);
+  if(inside.side){const sd=IL.side;const sb=hint&&hint.kind==='side'?-Math.abs(Math.sin(now*5))*sd.h*0.04:0;rct(sd.x,sd.y+sb,sd.w,sd.h,C.B);circ(sd.x+sd.w*0.22,sd.y+sb+sd.h*0.55,sd.w*0.07,C.K);
+    rct(sd.x+sd.w*0.2,sd.y+sb+sd.h*0.12,sd.w*0.6,sd.h*0.2,C.W);}
+  // ceiling cloth
+  if(h.items.cloth>0||inside.clothComing){
+    const cl=inside.cloth;const cw=Math.min(W*0.5,H*0.5)*0.9;const ax=W*0.5,ay=cy+H*0.02;
+    const sw=Math.sin(cl.ph)*cl.amp;
+    const isH=hint&&hint.kind==='item'&&hint.ref==='cloth';const hb=isH?Math.abs(Math.sin(now*5))*cw*0.04:0;
+    if(!inside.clothComing){
+      ln(ax-cw*0.45,ay,ax-cw*0.4+sw*cw*0.1,ay+cw*0.12+hb,lw);ln(ax+cw*0.45,ay,ax+cw*0.4+sw*cw*0.1,ay+cw*0.12+hb,lw);
+      cx.save();cx.translate(ax+sw*cw*0.12,ay+cw*0.12+hb);cx.rotate(sw*0.12);
+      const tipx=sw*cw*0.15,tipy=cw*0.5;
+      poly([-cw*0.45,0,cw*0.45,0,tipx,tipy],C.B);ln(0,0,tipx*0.5,tipy*0.9,lw*0.7);
+      const rf=reflect(cw*0.45,0,cw*0.3,0,cw*0.38,cw*0.1);poly([cw*0.3,0,rf[0],rf[1],cw*0.38,cw*0.1],C.W);
+      cx.restore();
+    }
+  }
+  // items
+  for(const sl of interiorSlots(h)){
+    const isH=hint&&hint.kind==='item'&&hint.ref===sl.t;
+    let sc=1,yy=sl.y;
+    if(inside.newT!=null&&inside.newType===sl.t&&inside.newT<1){sc=backOut(clamp(inside.newT,0,1));}
+    if(isH)yy-=Math.abs(Math.sin(now*5))*sl.s*0.08;
+    const pp=(inside.press&&inside.press.t===sl.t)?inside.press.a:0;
+    cx.save();cx.translate(sl.x,yy);cx.scale(sc*(1+pp*0.12),sc*(1-pp*0.15));
+    drawItem(sl.t,0,0,sl.s,{n:h.items.stored,stack:sl.t==='desk'?(inside.stack||0):0});cx.restore();
+  }
+  // flying blocks
+  for(const b of inside.fly){const tt=clamp(b.t/b.dur,0,1);const x=lerp(b.x0,b.x1,tt),y=lerp(b.y0,b.y1,tt)-Math.sin(tt*Math.PI)*b.arc;drawBlock(x,y,b.s*(b.t>b.dur+1.5?Math.max(0,1-(b.t-b.dur-1.5)*3):1));}
+  // actors
+  const ac=inside.actors.slice().sort((a,b)=>a.y-b.y);
+  for(const a of ac){const d=a.d;const sv={pose:d.pose,face:d.face,jump:d.jump,walkPh:d.walkPh,hand:d.hand,hideG:d.hideG,poseOpt:d.poseOpt,sqz:d.sqz};
+    d.pose=a.pose;d.face=a.face;d.jump=a.jump;d.walkPh=a.ph;d.hand=a.hand||null;d.hideG=a.hideG;d.poseOpt=a.poseOpt||{};d.sqz=0;
+    drawDoll(d,a.x,a.y,IL.DI);Object.assign(d,sv);}
+}
+
+// =====================================================================
+//  hint & demo hand
+// =====================================================================
+function drawRays(x,y,r){
+  cx.save();cx.translate(x,y);cx.rotate(now*1.2);const n=8,pu=1+0.12*Math.sin(now*6);
+  for(let i=0;i<n;i++){const a=i*Math.PI*2/n;const r1=r*pu,r2=r*pu+Math.max(10,r*0.35);
+    poly([Math.cos(a-0.09)*r1,Math.sin(a-0.09)*r1,Math.cos(a)*r2,Math.sin(a)*r2,Math.cos(a+0.09)*r1,Math.sin(a+0.09)*r1],C.Y);}
+  cx.restore();
+}
+function hintPoint(hn){
+  if(!hn)return null;
+  if(hn.kind==='garment'){const g=GR[hn.ref];if(g.on>=0){const d=dolls[g.on];return{x:d.x,y:d.y-D*0.47,r:D*0.4};}return{x:g.x,y:g.y-rackSize(hn.ref)*0.05,r:rackSize(hn.ref)*0.5};}
+  if(hn.kind==='house'){const p=lotXY(hn.ref.lot);return{x:p.x,y:p.y-S*0.5,r:S*0.62};}
+  if(hn.kind==='block')return{x:blk.x,y:blk.y,r:S*0.22};
+  if(hn.kind==='model')return{x:mdl.x,y:mdl.y-S*0.1,r:S*0.3};
+  if(hn.kind==='item'){if(hn.ref==='cloth'){return{x:W*0.5,y:IL.ceil+H*0.02+Math.min(W*0.5,H*0.5)*0.35,r:Math.min(W,H)*0.2};}
+    for(const sl of interiorSlots(inside.h))if(sl.t===hn.ref)return{x:sl.x,y:sl.y-sl.s*0.4,r:sl.s*0.7};return null;}
+  if(hn.kind==='door')return{x:IL.door.x+IL.door.w/2,y:IL.door.y+IL.door.h/2,r:IL.door.w*0.75};
+  if(hn.kind==='side')return{x:IL.side.x+IL.side.w/2,y:IL.side.y+IL.side.h/2,r:IL.side.w*0.75};
+  return null;
+}
+function hintTarget(hn){
+  if(!hn)return null;
+  if(hn.to==='doll'){const d=dolls[hn.doll];return{x:d.x,y:d.y-D*0.47};}
+  if(hn.to==='shelf')return{x:LY.shelf.x,y:LY.shelf.y-S*0.1};
+  return null;
+}
+function drawHand(x,y,sc){
+  const u=Math.max(16,Math.min(W,H)*0.05)*sc;
+  cx.save();cx.translate(x,y);lw=Math.max(2.5,u*0.12);
+  rct(-u*0.16,-u*0.05,u*0.32,u*0.9,C.W);
+  poly([-u*0.5,u*0.4,u*0.55,u*0.4,u*0.45,u*1.3,-u*0.4,u*1.3],C.W);
+  ln(-u*0.15,u*0.4,-u*0.15,u*0.75,lw*0.7);ln(u*0.18,u*0.4,u*0.18,u*0.75,lw*0.7);
+  cx.restore();lw=LW;
+}
+function drawDemo(){
+  if(!demo)return;const t=demo.t;const T=demo.dur;
+  const p0=demo.p0,p1=demo.p1;let x,y,sc=1;
+  if(t<0.3){x=p0.x;y=p0.y;sc=easeOut(t/0.3);}
+  else if(t<0.6){x=p0.x;y=p0.y;sc=1-0.18*Math.sin((t-0.3)/0.3*Math.PI);}
+  else if(t<T-0.6){const k=easeIO((t-0.6)/(T-1.2));x=lerp(p0.x,p1.x,k);y=lerp(p0.y,p1.y,k)-Math.sin(k*Math.PI)*S*0.4;sc=0.88;}
+  else if(t<T-0.3){x=p1.x;y=p1.y;sc=1-0.18*Math.sin((t-(T-0.6))/0.3*Math.PI);}
+  else{x=p1.x;y=p1.y;sc=Math.max(0.01,1-(t-(T-0.3))/0.3);}
+  if(demo.carry&&t>=0.6&&t<T-0.4){cx.save();cx.translate(x,y-S*0.05);const s=demo.carry==='block'?S*0.22:rackSize(demo.carry)*0.5;
+    if(demo.carry==='block')drawBlock(0,0,s);else if(demo.carry==='model')drawModel(0,0,S*0.6);else drawGarmentLocal(demo.carry,s,1,0,false);cx.restore();}
+  drawHand(x,y,sc);
+}
+
+// =====================================================================
+//  game logic : dressing, jobs, building
+// =====================================================================
+const AQ={walk:(tgt,opt)=>({k:'walk',tgt,opt:opt||{}}),pose:(p,t,opt)=>({k:'pose',p,t,opt:opt||{}}),fn:f=>({k:'fn',f})};
+function then(d,list){d.q.unshift(...list);}
+function resolve(t){
+  if(t.lot!=null){const p=lotXY(t.lot);return{x:p.x+(t.dx||0)*S,y:p.y+(t.dy||0)*S};}
+  if(t.box)return{x:LY.box.x+S*0.35,y:LY.box.y+S*0.02};
+  if(t.edge){return{x:t.edge<0?-D:W+D,y:LY.streetY};}
+  return{x:t.x,y:t.y};
+}
+function doorSpot(d,lot){return{lot,dx:(d.id-1)*0.17,dy:0.1};}
+function gaitSpeed(d){const g=d.garment;return g==='cape'?1.2:g==='vest'?0.85:g==='jacket'?0.95:1;}
+function stepRate(d){const g=d.garment;return g==='cape'?10:g==='vest'?7:g==='jacket'?13:9;}
+function dollTorso(d){return{x:d.x,y:d.y-D*0.47};}
+
+function dress(d,k){
+  const g=GR[k];
+  if(g.on===d.id)return;
+  // take off from previous wearer
+  if(g.on>=0){const prev=dolls[g.on];prev.garment=null;if(k==='vest'&&prev.pocket){prev.pocket=null;blockBack();}}
+  let old=d.garment,oldHome=null;
+  if(old){const og=GR[old];og.on=-1;og.x=d.x;og.y=d.y-D*0.5;og.fold=1;og.sq=0.3;
+    const gh=ST.garments[old].homes;if(gh.length)oldHome=houseById(gh[gh.length-1]);
+    if(old==='vest'&&d.pocket){d.pocket=null;blockBack();}
+    if(d.hand){d.hand=null;blockBack();}
+  }
+  d.garment=k;g.on=d.id;g.sel=false;g.drag=false;g.lift=0;
+  ST.flags.worn[k]=(ST.flags.worn[k]||0)+1;ST.flags.dressed[d.id]=1;
+  active=d.id;d.touchT=now;
+  d.q=[];d.restLot=null;d.sqz=0.35;
+  SND.pon(PITCH[k]);burst(d.x,d.y-D*0.5,10,['R','B','Y','K']);
+  d.jobPending=true;
+  d.q.push(AQ.pose('cheer',0.55));
+  d.q.push(AQ.fn(()=>planJob(d)));
+  bump();
+  // item 7: the next doll stops by the house the old garment made
+  if(oldHome){const others=dolls.filter(o=>o!==d&&o.arrived&&!o.drag&&!o.jobPending);
+    if(others.length){others.sort((a,b)=>(a.home===oldHome.id)-(b.home===oldHome.id));const o=others[0];later(0.8,()=>{if(!o.drag&&!o.jobPending)stopBy(o,oldHome);});}}
+}
+function blockBack(){blk.state='gone';blk.refill=0.8;}
+function undress(d){const k=d.garment;if(!k)return;const g=GR[k];g.on=-1;g.x=d.x;g.y=d.y-D*0.5;d.garment=null;if(k==='vest'&&d.pocket){d.pocket=null;blockBack();}if(d.hand){d.hand=null;blockBack();}d.jobPending=false;d.q=[];SND.flap(PITCH[k]);}
+
+function nearestLot(from,list){let best=null,bd=1e9;for(const i of list){const p=lotXY(i);const dd=Math.hypot(p.x-from.x,p.y-from.y);if(dd<bd){bd=dd;best=i;}}return best;}
+function nearestHouse(from,filter){let best=null,bd=1e9;for(const h of ST.houses){if(filter&&!filter(h))continue;const p=lotXY(h.lot);const dd=Math.hypot(p.x-from.x,p.y-from.y);if(dd<bd){bd=dd;best=h;}}return best;}
+function goLot(d,lot,after){d.q.push(AQ.walk(doorSpot(d,lot)));d.q.push(AQ.fn(()=>{after?after(d,lot):arriveAct(d,lot);}));}
+function fetchBlock(d,into){
+  d.q.push(AQ.walk({box:1}));
+  const tryTake=AQ.fn(()=>{if(blk.state==='box'){blk.state='fly';ghost({kind:'block',x0:blk.x,y0:blk.y,x1:d.x,y1:d.y-D*(into==='pocket'?0.36:0.5),s0:S*0.22,s1:S*0.16,dur:0.35,cb:()=>{if(into==='pocket')d.pocket='block';else d.hand='block';SND.pick(PITCH.block);}});blockBack();then(d,[AQ.pose(into==='pocket'?'pocket':'carry',0.5)]);}
+    else{then(d,[AQ.pose('think',0.5),tryTake]);}});
+  d.q.push(tryTake);
+}
+function planJob(d){
+  const k=d.garment;if(!k){d.jobPending=false;return;}
+  const gd=ST.garments[k];
+  // shared garment: someone else's house -> visit and share
+  if(gd.owner>=0&&gd.owner!==d.id&&gd.homes.length){const h=houseById(gd.homes[gd.homes.length-1]);if(h){shareJob(d,k,h);return;}}
+  const pos={x:d.x,y:d.y};const em=emptyLots();
+  if(k==='cape'){
+    {const here=d.atLot>=0?houseAt(d.atLot):null;if(here&&(here.room||here.shed)&&!here.roof&&Math.hypot(lotXY(here.lot).x-d.x,lotXY(here.lot).y-d.y)<S){goLot(d,here.lot);return;}}
+    if(em.indexOf(ST.bench)>=0){goLot(d,ST.bench);return;}
+    const tgt=nearestHouse(pos,h=>h.room&&!h.roof&&h.items.desk>0)||nearestHouse(pos,h=>(h.room||h.shed)&&!h.roof);
+    if(tgt){goLot(d,tgt.lot);return;}
+    if(em.length){goLot(d,nearestLot(pos,em));return;}
+    const any=nearestHouse(pos);if(any)goLot(d,any.lot);else d.jobPending=false;return;
+  }
+  if(k==='jacket'){
+    let target=null;
+    const roofLots=ST.houses.filter(h=>h.roof&&!h.room).map(h=>h.lot);
+    const adj=em.filter(i=>roofLots.some(r=>neighbors(r,i)));
+    if(adj.length)target=nearestLot(pos,adj);else if(em.length)target=nearestLot(pos,em);
+    if(target==null){const h=nearestHouse(pos,h=>!h.room);if(h)target=h.lot;else{const a=nearestHouse(pos);target=a?a.lot:null;}}
+    if(target==null){d.jobPending=false;return;}
+    if(d.last==='carry'&&!houseAt(target))fetchBlock(d,'hand');
+    goLot(d,target);return;
+  }
+  if(k==='vest'){
+    if(d.last==='sit'){const h=nearestHouse(pos,h=>h.roof||h.rest);if(h){goLot(d,h.lot);return;}
+      if(em.length){goLot(d,nearestLot(pos,em));return;}}
+    fetchBlock(d,'pocket');
+    if(d.last==='carry'){const home=houseById(d.home);const h=(home&&home.room)?home:nearestHouse(pos,h=>h.room)||home||nearestHouse(pos,h=>h.roof);if(h){goLot(d,h.lot);return;}}
+    const e2=em.filter(i=>i!==ST.bench);const lot=e2.length?nearestLot(LY.box,e2):(em.length?nearestLot(LY.box,em):null);
+    if(lot!=null){goLot(d,lot);return;}
+    const sh=nearestHouse(pos,h=>h.shed)||nearestHouse(pos);if(sh)goLot(d,sh.lot);else d.jobPending=false;
+  }
+}
+function noteArrive(d,lot){
+  const prev=d.atLot;d.atLot=lot;
+  if(prev>=0&&prev!==lot&&neighbors(prev,lot)&&houseAt(prev)&&houseAt(lot)){
+    const key=Math.min(prev,lot)+'-'+Math.max(prev,lot);ST.trips[key]=(ST.trips[key]||0)+1;
+    if(!ST.corridors.some(c=>c[0]===Math.min(prev,lot)&&c[1]===Math.max(prev,lot))){
+      const n=ST.trips[key];if((n>=4&&rng()<0.12)||n>=12){makeCorridor(Math.min(prev,lot),Math.max(prev,lot));}
+    }
+  }
+}
+function makeCorridor(a,b){
+  ST.corridors.push([a,b]);bump();
+  const pa=lotXY(a),pb=lotXY(b);const mx=(pa.x+pb.x)/2,my=(pa.y+pb.y)/2-S*0.4;
+  SND.katan(1.2);later(0.18,()=>SND.katan(1.4));later(0.4,()=>SND.chime());burst(mx,my,14,['R','Y','B']);
+  for(const d of dolls)if(d.arrived&&!d.drag&&!d.q.length&&(d.atLot===a||d.atLot===b)){d.q=[AQ.pose('clap',1.0)];}
+}
+function learn(d,h){
+  const gst=gestureOf(h);const was=d.learned[gst];d.learned[gst]=true;d.last=gst;
+  if(!was){SND.learn();burst(d.x,d.y-D,8,gst==='sit'?['B','B','K']:['Y','Y','K']);}bump();
+}
+function visitSeq(d,h){
+  const gst=gestureOf(h);const seats=seatSpots(h);
+  const L=[AQ.fn(()=>learn(d,h))];
+  if(gst==='sit'&&seats.length){const s=seats[d.id%seats.length];L.push(AQ.walk({lot:h.lot,dx:s.dx,dy:0.03}));L.push(AQ.pose('sit',1.6,{seatH:0.13}));L.push(AQ.walk(doorSpot(d,h.lot)));}
+  else if(gst==='sit')L.push(AQ.pose('sit',1.2,{seatH:0.02}));
+  else L.push(AQ.pose('carry',1.2));
+  return L;
+}
+function arriveAct(d,lot){
+  d.jobPending=false;
+  const h=houseAt(lot);
+  noteArrive(d,lot);
+  if(h){
+    if(d.pocket==='block'){deliverBlock(d,h);return;}
+    if(d.hand==='block'){placeHand(d,h);return;}
+    then(d,[...visitSeq(d,h),AQ.fn(()=>extendHouse(d,h))]);
+    return;
+  }
+  if(d.garment){buildAt(d,lot,d.garment);return;}
+  then(d,[AQ.pose('think',0.6)]);
+}
+function extendHouse(d,h){
+  const k=d.garment;if(!k)return;
+  if(k==='cape'&&!h.roof){addRoof(d,h);return;}
+  if(k==='jacket'&&!h.room){addRoom(d,h);return;}
+  if(k==='vest'&&d.last==='sit'){pullChair(d,h);return;}
+}
+function newHouse(lot,kind,d){
+  const h=mkHouse(lot,kind);h.id=ST.nextHid++;h.owner=d?d.id:-1;h.anim=0;if(lot===ST.bench){h.bench=true;}
+  ST.houses.push(h);return h;
+}
+function garmentHome(d,k,h){const gd=ST.garments[k];if(gd.owner<0)gd.owner=d.id;if(gd.owner===d.id&&gd.homes.indexOf(h.id)<0)gd.homes.push(h.id);if(d.home<0)d.home=h.id;}
+function buildFx(h,p,cb){
+  const pp=lotXY(h.lot);
+  later(0.25,()=>SND.katan(p));later(0.6,()=>SND.katan(p*1.12));
+  later(1.0,()=>{SND.chime();burst(pp.x,pp.y-S*0.6,16,['R','B','Y','K']);cheerOthers(h);if(cb)cb();afterBuild(h);});
+}
+function cheerOthers(h){SND.clap();for(const o of dolls)if(o.arrived&&!o.drag&&!o.q.length){o.q=[AQ.pose('clap',1.1)];}}
+function shapeGhost(d,k,h,cb,toY){const p=lotXY(h?h.lot:0);ghost({kind:'garment',type:k,x0:d.x,y0:d.y-D*0.5,x1:p.x,y1:toY!=null?toY:p.y-S*0.5,s0:D*0.5,s1:S*0.9,dur:0.45,arc:S*0.5,flip:true,cb});}
+function buildAt(d,lot,k){
+  d.restLot=lot;
+  const L=[AQ.pose('fold',0.45),AQ.fn(()=>{
+    if(k==='cape'){const h=newHouse(lot,'roof',d);h.roof=true;h.anim=-0.6;shapeGhost(d,k,h,()=>{});garmentHome(d,k,h);
+      buildFx(h,PITCH.cape,()=>gatherSit(h,d));}
+    else if(k==='jacket'){const h=newHouse(lot,'room',d);h.room=true;h.anim=-0.6;shapeGhost(d,k,h,()=>{});garmentHome(d,k,h);
+      const variant=d.hand==='block'?'carry':d.last;
+      buildFx(h,PITCH.jacket,()=>{
+        if(variant==='carry'){if(d.hand)d.hand=null;h.items.shelfdeck++;h.pop={t:'shelfdeck',a:0};ST.flags.delivered.shelfdeck=1;then(d,[AQ.pose('carry',0.8)]);}
+        else if(variant==='sit'){h.items.benchdeck++;h.pop={t:'benchdeck',a:0};const s=seatSpots(h).find(o=>o.t==='benchdeck');then(d,[AQ.walk({lot,dx:s?s.dx:0,dy:0.03}),AQ.pose('sit',2.5,{seatH:0.13})]);gatherSit(h,d);}
+        bump();});}
+    else if(k==='vest'){
+      if(d.pocket==='block'){const h=newHouse(lot,'shed',d);h.shed=true;h.anim=-0.6;garmentHome(d,k,h);ST.flags.shedBuilt=1;
+        then(d,[AQ.pose('pocket',0.4),AQ.fn(()=>{d.pocket=null;const pp=lotXY(lot);ghost({kind:'block',x0:d.x,y0:d.y-D*0.35,x1:pp.x,y1:pp.y-S*0.55,s0:S*0.16,s1:S*0.1,dur:0.5,cb:()=>{h.items.stored++;bump();}});})]);
+        shapeGhost(d,k,h,()=>{});buildFx(h,PITCH.vest);}
+      else if(d.last==='sit'){const h=newHouse(lot,'rest',d);h.rest=true;h.anim=-0.3;garmentHome(d,k,h);then(d,[AQ.fn(()=>pullChair(d,h))]);}
+      else{const h=newHouse(lot,'shed',d);h.shed=true;h.anim=-0.6;garmentHome(d,k,h);ST.flags.shedBuilt=1;shapeGhost(d,k,h,()=>{});buildFx(h,PITCH.vest,()=>{
+        // empty shed: go collect a block for it
+        if(d.garment==='vest'){d.jobPending=true;fetchBlock(d,'pocket');goLot(d,lot);}});}
+    }
+    bump();
+  }),AQ.pose('fold',0.9)];
+  then(d,L);
+}
+function addRoof(d,h){
+  then(d,[AQ.pose('fold',0.45),AQ.fn(()=>{h.roof=true;h.roofAnim=-0.5;shapeGhost(d,'cape',h,()=>{},lotXY(h.lot).y-S*0.85);garmentHome(d,'cape',h);buildFx(h,PITCH.cape,()=>gatherSit(h,d));bump();}),AQ.pose('fold',0.8)]);
+}
+function addRoom(d,h){
+  then(d,[AQ.pose('fold',0.45),AQ.fn(()=>{h.room=true;h.roofAnim=1;shapeGhost(d,'jacket',h,()=>{});garmentHome(d,'jacket',h);
+    if(d.last==='sit'){h.items.benchdeck++;h.pop={t:'benchdeck',a:0};}
+    buildFx(h,PITCH.jacket);bump();}),AQ.pose('fold',0.8)]);
+}
+function pullChair(d,h){
+  then(d,[AQ.pose('pocket',0.5),AQ.fn(()=>{
+    const pp=lotXY(h.lot);const n=townItemPos(h).length;
+    ghost({kind:'item',type:'chair',x0:d.x,y0:d.y-D*0.35,x1:pp.x+S*0.3,y1:pp.y,s0:S*0.08,s1:S*0.3,dur:0.5,arc:S*0.5,cb:()=>{
+      h.items.chair++;h.rest=true;h.pop={t:'chair',a:0};ST.flags.chairs++;SND.katan(1.1);SND.chime();burst(pp.x,pp.y-S*0.3,12,['R','R','Y','K']);bump();
+      gatherSit(h,d);
+    }});
+    SND.pick(1.1);
+  }),AQ.pose('cheer',0.8)]);
+}
+function deliverBlock(d,h){
+  then(d,[AQ.pose('pocket',0.5),AQ.fn(()=>{d.pocket=null;d.hand='block';SND.pick(PITCH.block);}),AQ.pose('carry',0.5),AQ.fn(()=>{
+    d.hand=null;
+    const type=h.shed?'stored':h.room?'desk':(h.roof||h.rest)?'seat':'stored';
+    const pp=lotXY(h.lot);
+    ghost({kind:'block',x0:d.x,y0:d.y-D*0.5,x1:pp.x,y1:pp.y-S*0.12,s0:S*0.18,s1:S*0.2,dur:0.4,cb:()=>{
+      h.items[type]++;h.pop={t:type,a:0};ST.flags.delivered[type]=1;SND.katan(PITCH.block);SND.chime();burst(pp.x,pp.y-S*0.2,12,['Y','Y','R','K']);bump();
+      const sp=townItemPos(h).find(o=>o.t===type);
+      if(type==='desk'&&sp){then(d,[AQ.walk({lot:h.lot,dx:sp.dx-0.12,dy:0.03}),AQ.pose('sit',2.0,{seatH:0.12})]);}
+      else if(type==='seat'&&sp){then(d,[AQ.walk({lot:h.lot,dx:sp.dx,dy:0.03}),AQ.pose('sit',2.0,{seatH:0.13})]);}
+      else then(d,[AQ.pose('cheer',0.7)]);
+    }});
+  })]);
+}
+function placeHand(d,h){
+  then(d,[AQ.pose('carry',0.4),AQ.fn(()=>{d.hand=null;const t=h.room?'shelfdeck':(h.roof||h.rest)?'seat':'stored';const pp=lotXY(h.lot);
+    ghost({kind:'block',x0:d.x,y0:d.y-D*0.5,x1:pp.x,y1:pp.y-S*0.15,s0:S*0.18,s1:S*0.18,dur:0.35,cb:()=>{h.items[t]++;h.pop={t,a:0};ST.flags.delivered[t]=1;SND.katan(1.1);SND.chime();bump();}});})]);
+}
+function gatherSit(h,except){
+  const seats=seatSpots(h);let si=0;
+  for(const o of dolls){if(o===except||!o.arrived||o.drag||o.jobPending||o.q.length)continue;
+    const s=seats.length?seats[(si++)%seats.length]:null;
+    o.q=[AQ.walk(s?{lot:h.lot,dx:s.dx,dy:0.03}:doorSpot(o,h.lot)),AQ.fn(()=>noteArrive(o,h.lot)),AQ.pose('sit',3.0,{seatH:s?0.13:0.02}),AQ.pose('clap',0.8)];
+    o.restLot=h.lot;}
+}
+function afterBuild(h){
+  const B=dolls[1],Cc=dolls[2];
+  if(!B.arrived){later(0.5,()=>arriveDoll(B,h,-1));}
+  else if(!Cc.arrived&&ST.houses.length>=2){later(0.7,()=>arriveDoll(Cc,h,1));}
+}
+function arriveDoll(d,h,side){
+  if(d.arrived)return;d.arrived=true;d.x=side<0?-D:W+D;d.y=LY.streetY;d.atLot=-1;
+  if(d.home<0&&h.roof)d.home=h.id;
+  const seats=seatSpots(h);const s=seats.length?seats[seats.length-1]:null;
+  d.q=[AQ.walk(s&&h.roof?{lot:h.lot,dx:s.dx,dy:0.03}:doorSpot(d,h.lot)),AQ.fn(()=>{noteArrive(d,h.lot);}),AQ.pose(s&&h.roof?'sit':'wave',3.0,{seatH:0.13}),AQ.pose('wave',0.8)];
+  bump();
+}
+function learnQuiet(d,h){d.learned[gestureOf(h)]=true;d.last=gestureOf(h);}
+function stopBy(o,h){
+  ST.flags.stopby++;
+  o.q=[AQ.walk(doorSpot(o,h.lot)),AQ.fn(()=>{noteArrive(o,h.lot);}),...visitSeq(o,h),AQ.pose('wave',0.7)];
+}
+function shareJob(d,k,h){
+  const owner=dolls[ST.garments[k].owner];
+  d.q.push(AQ.walk({lot:h.lot,dx:0.2,dy:0.1}));
+  d.q.push(AQ.fn(()=>shareAct(d,h,owner,k)));
+  if(owner&&owner.arrived&&owner!==d&&!owner.drag){owner.q=[AQ.walk({lot:h.lot,dx:-0.2,dy:0.1}),AQ.pose('wave',1.2)];owner.jobPending=false;}
+}
+function shareAct(d,h,owner,k){
+  noteArrive(d,h.lot);d.jobPending=false;ST.flags.shared++;
+  const mode=d.last||'invite';const pp=lotXY(h.lot);
+  if(mode==='sit'){
+    h.items.benchdeck++;h.pop={t:'benchdeck',a:0};SND.katan(1);SND.chime();bump();
+    const s=seatSpots(h).filter(o=>o.t==='benchdeck');
+    then(d,[AQ.walk({lot:h.lot,dx:s.length?s[s.length-1].dx:0.1,dy:0.03}),AQ.pose('sit',3,{seatH:0.13}),AQ.pose('clap',0.8)]);
+    if(owner&&owner!==d&&owner.arrived){owner.q=[AQ.walk({lot:h.lot,dx:s.length?s[0].dx:-0.1,dy:0.03}),AQ.pose('sit',3,{seatH:0.13}),AQ.pose('clap',0.8)];}
+  }else if(mode==='carry'){
+    // the senior resident hands over a block; the newcomer builds next door with it
+    const src=owner&&owner.arrived?owner:d;
+    then(d,[AQ.pose('carry',0.4),AQ.fn(()=>{ghost({kind:'block',x0:src.x,y0:src.y-D*0.6,x1:d.x,y1:d.y-D*0.5,s0:S*0.2,s1:S*0.18,dur:0.4,cb:()=>{d.hand='block';SND.pick(PITCH.block);}});}),AQ.pose('think',0.5),AQ.fn(()=>{
+      const em=emptyLots();const adj=em.filter(i=>neighbors(i,h.lot));const lot=adj.length?adj[0]:(em.length?nearestLot(pp,em):null);
+      if(lot!=null){d.q.push(AQ.walk(doorSpot(d,lot)));d.q.push(AQ.fn(()=>{noteArrive(d,lot);buildAt(d,lot,k);}));}
+      else placeHand(d,h);
+    })]);
+    if(owner&&owner!==d&&owner.arrived)owner.q=[AQ.pose('carry',0.6),AQ.pose('wave',0.8)];
+  }else{
+    // invite: the senior resident beckons, newcomer moves in and the tool is shared
+    const tool=k==='cape'?'cloth':k==='jacket'?'deck':'toybox';
+    if(owner&&owner!==d&&owner.arrived)owner.q=[AQ.pose('wave',1.2),AQ.pose('clap',0.8)];
+    then(d,[AQ.pose('think',0.5),AQ.fn(()=>{d.home=h.id;learn(d,h);h.items[tool]=Math.min(9,h.items[tool]+1);h.pop={t:tool,a:0};SND.chime();SND.clap();burst(pp.x,pp.y-S*0.4,12,['R','B','Y']);bump();}),AQ.pose('cheer',0.8)]);
+  }
+}
+
+// ---------- autonomous residents ----------
+function idleAI(d,dt){
+  if(!d.arrived||view!=='town')return;
+  d.idleT-=dt;if(d.idleT>0)return;
+  d.idleT=5+rng()*5;
+  if(now-d.touchT<4)return;
+  const hs=ST.houses;if(!hs.length)return;
+  const r=rng();
+  const seatsH=hs.filter(h=>seatSpots(h).length);
+  if(d.learned.sit&&seatsH.length&&r<0.38){const h=pick(seatsH);const s=pick(seatSpots(h));
+    d.q=[AQ.walk({lot:h.lot,dx:s.dx,dy:0.03}),AQ.fn(()=>noteArrive(d,h.lot)),AQ.pose('sit',3+rng()*2,{seatH:0.13})];d.restLot=h.lot;d.restDx=s.dx;d.restDy=0.03;return;}
+  if(d.learned.carry&&d.garment!=='vest'&&r<0.66&&blk.state==='box'){
+    const tg=hs.filter(h=>h.room||h.shed);if(tg.length){const h=pick(tg);
+      d.q=[AQ.walk({box:1}),AQ.fn(()=>{if(blk.state==='box'&&!d.hand){d.hand='block';blk.state='gone';blk.refill=1.2;SND.pick(1.1);}}),AQ.walk(doorSpot(d,h.lot)),AQ.fn(()=>{noteArrive(d,h.lot);if(d.hand){d.hand=null;blockBack();h.deskStack=(h.deskStack||0)+1;if(h.deskStack>2)h.deskStack=0;SND.katan(1.2);burst(lotXY(h.lot).x,lotXY(h.lot).y-S*0.2,5,['Y','K']);}}),AQ.pose('cheer',0.6)];
+      d.restLot=h.lot;d.restDx=(d.id-1)*0.17;d.restDy=0.1;return;}}
+  // visit / invite: prefer a neighbour of where we are
+  let cand=hs.filter(h=>h.lot!==d.atLot);if(!cand.length)return;
+  const nb=cand.filter(h=>d.atLot>=0&&neighbors(h.lot,d.atLot));
+  const h=(nb.length&&rng()<0.75)?pick(nb):pick(cand);
+  d.q=[AQ.walk(doorSpot(d,h.lot)),AQ.fn(()=>noteArrive(d,h.lot)),AQ.pose('wave',1.0)];
+  d.restLot=h.lot;d.restDx=(d.id-1)*0.17;d.restDy=0.1;
+  // invite another to follow sometimes
+  if(rng()<0.35){const o=dolls.find(o=>o!==d&&o.arrived&&!o.q.length&&!o.drag&&!o.jobPending);if(o){later(1.2,()=>{if(!o.q.length&&!o.drag){o.q=[AQ.walk({lot:h.lot,dx:(o.id-1)*0.17+0.08,dy:0.12}),AQ.fn(()=>noteArrive(o,h.lot)),AQ.pose('clap',0.8)];o.restLot=h.lot;o.restDx=(o.id-1)*0.17+0.08;o.restDy=0.12;}});}}
+}
+
+// =====================================================================
+//  update
+// =====================================================================
+function runDoll(d,dt){
+  if(d.sqz)d.sqz*=Math.pow(0.02,dt);if(Math.abs(d.sqz)<0.005)d.sqz=0;
+  if(d.jump<0||d.jv){d.jv+=S*9*dt;d.jump+=d.jv*dt;if(d.jump>=0){d.jump=0;d.jv=0;}}
+  if(!d.arrived||d.drag)return;
+  const a=d.q[0];
+  if(!a){if(d.pose!=='stand'){d.pose='stand';}idleAI(d,dt);return;}
+  if(a.k==='walk'){
+    const p=resolve(a.tgt);const dx=p.x-d.x,dy=p.y-d.y,dist=Math.hypot(dx,dy);
+    const sp=D*1.5*gaitSpeed(d)*(a.opt.fast?1.6:1);
+    if(dist<=sp*dt+0.5){d.x=p.x;d.y=p.y;d.q.shift();d.walking=false;d.pose='stand';if(a.tgt.lot!=null){d.restLot=a.tgt.lot;d.restDx=a.tgt.dx||0;d.restDy=a.tgt.dy||0;}else d.restLot=null;return;}
+    d.x+=dx/dist*sp*dt;d.y+=dy/dist*sp*dt;if(Math.abs(dx)>1)d.face=dx>=0?1:-1;
+    const before=Math.floor(d.walkPh/Math.PI);d.walkPh+=dt*stepRate(d);d.pose='walk';
+    if(Math.floor(d.walkPh/Math.PI)!==before&&view==='town'&&d.x>0&&d.x<W){SND.step(PITCH[d.garment]||1.1);
+      if(d.garment&&trail.length<24)trail.push({x:d.x,y:d.y,t:0,k:d.garment});}
+  }else if(a.k==='pose'){
+    if(a.t0==null){a.t0=0;d.pose=a.p;d.poseT=0;d.poseOpt=a.opt||{};if(a.p==='clap')SND.clap();if(a.p==='sit')SND.sit();}
+    a.t0+=dt;d.poseT+=dt;if(a.t0>=a.t){d.q.shift();d.pose='stand';}
+  }else if(a.k==='fn'){d.q.shift();a.f(d);}
+}
+function updateGarment(g,dt){
+  // spring squash
+  g.sqv+=(-160*g.sq-14*g.sqv)*dt;g.sq+=g.sqv*dt;
+  if(g.drag){const tf=g.on<0?1:1;g.fold=lerp(g.fold,1,1-Math.pow(0.001,dt));}
+  else if(g.sel){g.fold=lerp(g.fold,1,1-Math.pow(0.001,dt));g.lift=lerp(g.lift,rackSize(g.type)*0.18,1-Math.pow(0.001,dt));}
+  else{g.fold=lerp(g.fold,0,1-Math.pow(0.02,dt));g.lift=lerp(g.lift,0,1-Math.pow(0.01,dt));
+    if(g.on<0){const r=LY.rack[g.type];g.x=lerp(g.x,r.x,1-Math.pow(0.0005,dt));g.y=lerp(g.y,r.y,1-Math.pow(0.0005,dt));}}
+  g.str*=Math.pow(0.003,dt);if(g.wig>0)g.wig=Math.max(0,g.wig-dt*1.6);if(g.hideT>0)g.hideT-=dt;
+}
+function update(dt){
+  now+=dt;
+  for(let i=timers.length-1;i>=0;i--){const tm=timers[i];if(!tm)continue;tm.t-=dt;if(tm.t<=0){timers.splice(i,1);try{tm.f();}catch(e){}}}
+  for(const k of GTYPES)updateGarment(GR[k],dt);
+  for(const o of [deco.sun,deco.cloud,deco.bench,deco.shelf,blk,mdl])if(o.wig>0)o.wig=Math.max(0,o.wig-dt*1.6);
+  for(let i=0;i<LOTS;i++)if(deco.lots[i]>0)deco.lots[i]=Math.max(0,deco.lots[i]-dt*1.6);
+  if(blk.state==='gone'){blk.refill-=dt;if(blk.refill<=0){blk.state='box';blk.x=LY.box.x;blk.y=LY.box.y-S*0.22;blk.pop=0;}}
+  if(blk.pop!=null&&blk.pop<1)blk.pop+=dt*3;
+  // model
+  if(mdl.state==='base'){mdl.x=LY.mbase.x;mdl.y=LY.mbase.y;}
+  if(mdl.state==='fly'){mdl.t+=dt/0.6;if(mdl.t>=1){mdl.t=1;finishSave();}}
+  if(mdl.state==='drop'){mdl.t+=dt/0.6;if(mdl.t>=1){mdl.state='base';}}
+  for(const h of ST.houses){if(h.anim!=null&&h.anim<1)h.anim=Math.min(1,h.anim+dt*1.6);if(h.roofAnim!=null&&h.roofAnim<1)h.roofAnim=Math.min(1,h.roofAnim+dt*1.6);if(h.pop&&h.pop.a<1)h.pop.a+=dt*2.2;if(h.squash)h.squash*=Math.pow(0.01,dt);}
+  {const A0=dolls[0];if(ST.flags.worn.cape+ST.flags.worn.jacket+ST.flags.worn.vest===0&&!A0.q.length&&!A0.drag&&!(ptr&&ptr.kind==='garment')){const sk=selectedGarment()||'cape';A0.reachAt={x:GR[sk].x,y:GR[sk].y-GR[sk].lift};A0.face=GR[sk].x>=A0.x?1:-1;}}
+  if(view==='town'&&!trans){for(const d of dolls)runDoll(d,dt);}
+  else if(view==='in'&&inside&&!trans)updateInside(dt);
+  for(let i=parts.length-1;i>=0;i--){const p=parts[i];p.life+=dt;if(p.life>=p.max){parts.splice(i,1);continue;}p.vy+=S*5*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.r+=p.vr*dt;}
+  for(let i=ghosts.length-1;i>=0;i--){const g=ghosts[i];g.t+=dt;if(g.t>=g.dur){ghosts.splice(i,1);if(g.cb)try{g.cb();}catch(e){}}}
+  for(let i=trail.length-1;i>=0;i--){trail[i].t+=dt;if(trail[i].t>1.6)trail.splice(i,1);}
+  if(trans){trans.t+=dt/trans.dur;if(!trans.swapped&&trans.t>=0.5){trans.swapped=true;trans.swap();}if(trans.t>=1)trans=null;}
+  // hint & demo
+  hint=computeHint();
+  if(demo){demo.t+=dt;if(demo.t>=demo.dur)demo=null;}
+  else if(!demoShown&&hint&&!ptr&&!trans&&now-lastInput>4&&!anyJob()){startDemo(hint);demoShown=true;}
+}
+function anyJob(){return dolls.some(d=>d.jobPending||(d.q.length&&d.id===active&&now-d.touchT<6));}
+
+// =====================================================================
+//  hint logic (state based; one target at a time)
+// =====================================================================
+function computeHint(){
+  if(trans)return null;
+  if(view==='in'){
+    if(!inside)return null;
+    if(inside.newType&&!inside.newUsed&&inside.newT!=null&&inside.newT>=1)return{kind:'item',ref:inside.newType,tap:true};
+    if(!inside.anyUsed){const sl=interiorSlots(inside.h);if(inside.h.items.cloth>0)return{kind:'item',ref:'cloth',tap:true};if(sl.length)return{kind:'item',ref:sl[0].t,tap:true};}
+    if(inside.side&&!inside.sideUsed&&inside.anyUsed)return{kind:'side',tap:true};
+    return{kind:'door',tap:true};
+  }
+  if(dolls.some(d=>d.jobPending))return null;
+  if(ST.flags.worn.cape+ST.flags.worn.jacket+ST.flags.worn.vest===0)return gHint('cape',0);
+  if(!ST.houses.length)return gHint(GR.cape.on>=0?'jacket':'cape',0);
+  if(!ST.flags.enteredAny){const h=ST.houses.find(h=>h.roof)||ST.houses[0];if(h.anim>=1)return{kind:'house',ref:h,tap:true};return null;}
+  if(!ST.flags.worn.jacket)return gHint('jacket',active);
+  if(!ST.flags.worn.vest)return gHint('vest',pickUnvisitedDoll());
+  const vd=dolls.find(d=>d.arrived&&d.garment==='vest'&&!d.pocket&&!d.q.length);
+  if(vd&&!ST.flags.pocketHand&&blk.state==='box')return{kind:'block',to:'doll',doll:vd.id};
+  const nd=dolls.find(d=>d.arrived&&!ST.flags.dressed[d.id]&&!d.q.length);
+  if(nd){const k=GTYPES.find(k=>GR[k].on>=0&&GR[k].on!==nd.id&&ST.garments[k].homes.length)||GTYPES.find(k=>GR[k].on<0)||'jacket';return gHint(k,nd.id);}
+  const notIn=ST.houses.find(h=>!ST.flags.entered[h.id]&&h.anim>=1);
+  if(notIn&&Object.keys(ST.flags.entered).length<2)return{kind:'house',ref:notIn,tap:true};
+  if(ST.houses.length>=2&&mdl.state==='base'&&((!ST.saved&&ST.rev!==ST.savedRev)||ST.rev-ST.savedRev>14))return{kind:'model',to:'shelf'};
+  if(notIn)return{kind:'house',ref:notIn,tap:true};
+  // fallback: a garment not on the active doll, onto an idle doll
+  const idle=dolls.filter(d=>d.arrived&&!d.q.length);const tgtD=idle.length?idle[Math.floor(now/12)%idle.length]:dolls[0];
+  const ks=GTYPES.filter(k=>GR[k].on!==tgtD.id);return gHint(ks[Math.floor(now/12)%ks.length],tgtD.id);
+}
+function pickUnvisitedDoll(){const a=dolls.find(d=>d.arrived&&!d.learned.sit&&!d.learned.carry&&!d.q.length);return a?a.id:active;}
+function gHint(k,dollId){if(!dolls[dollId]||!dolls[dollId].arrived)dollId=0;return{kind:'garment',ref:k,to:'doll',doll:dollId};}
+function startDemo(hn){
+  const p=hintPoint(hn);if(!p)return;
+  let p1=hintTarget(hn)||p;let carry=null;
+  if(hn.kind==='garment')carry=hn.ref;else if(hn.kind==='block')carry='block';else if(hn.kind==='model')carry='model';
+  demo={t:0,dur:hn.tap?1.4:2.2,p0:{x:p.x,y:p.y},p1:{x:p1.x,y:p1.y},carry};
+}
+
+// =====================================================================
+//  interior
+// =====================================================================
+const CONV={cape:'cloth',jacket:'deck',vest:'toybox'};
+function enterHouse(h,vis){
+  if(trans)return;
+  vis=vis||dolls[active];if(!vis||!vis.arrived)vis=dolls[0];
+  h.squash=0.12;SND.door();
+  const r=houseRect(h);
+  trans={t:0,dur:0.8,dir:'in',rect:r,swapped:false,swap:()=>{setupInside(h,vis);view='in';SND.katan(1);}};
+}
+function setupInside(h,vis,fromSide){
+  ST.flags.enteredAny=1;ST.flags.entered[h.id]=1;
+  const res=dolls.filter(d=>d.arrived&&d!==vis&&(d.home===h.id||d.restLot===h.lot)).slice(0,2);
+  const actors=[];const DI=IL.DI;
+  const x0=IL.door.x+IL.door.w*0.5;
+  actors.push({d:vis,x:x0+IL.door.w*0.6,y:IL.floor,tx:null,pose:'stand',face:1,jump:0,jv:0,ph:0,t:0,hideG:false,vis:true,q:[]});
+  res.forEach((d,i)=>actors.push({d,x:W*(0.55+i*0.18),y:IL.floor,tx:null,pose:'stand',face:-1,jump:0,jv:0,ph:0,t:0,hideG:false,q:[]}));
+  const corr=ST.corridors.find(c=>c[0]===h.lot||c[1]===h.lot);
+  inside={h,vis,actors,fly:[],cloth:{ph:0,amp:0.15,v:0},newType:null,newT:null,newUsed:false,anyUsed:false,stack:0,doorOpen:0,win:{wig:0},
+    side:corr?(corr[0]===h.lot?corr[1]:corr[0]):null,sideUsed:!!fromSide,autoT:3,clothComing:false,press:null,t:0};
+  learnIn(vis,h);
+  const k=vis.garment;
+  if(k&&!h.made[k]){
+    const type=CONV[k];h.made[k]=true;inside.newType=type;
+    const a=actors[0];
+    later(0.5,()=>{a.hideG=true;SND.flap(PITCH[k]);
+      const sl=interiorSlots(h);
+      let tx=W*0.5,ty=IL.ceil+H*0.15,s1=Math.min(W,H)*0.35;
+      if(type==='cloth'){inside.clothComing=true;}
+      else{const fake=Object.assign({},h,{items:Object.assign({},h.items)});fake.items[type]++;const L=interiorItems(fake);const n=L.length;const x0=IL.door.x+IL.door.w+W*0.06,x1=(inside.side?IL.side.x-W*0.04:W-ins.r-W*0.04);const idx=L.indexOf(type);tx=lerp(x0,x1,(idx+0.5)/n);ty=IL.floor-IL.I*0.4;s1=IL.I;}
+      ghost({kind:'garment',type:k,x0:a.x,y0:a.y-IL.DI*0.5,x1:tx,y1:ty,s0:IL.DI*0.5,s1,dur:0.7,arc:H*0.15,flip:true,inside:true,cb:()=>{
+        if(!inside||inside.h!==h)return;
+        h.items[type]=Math.min(9,h.items[type]+1);inside.clothComing=false;inside.newT=0;SND.katan(PITCH[k]);SND.chime();
+        if(type==='cloth'){inside.cloth.amp=1;ST.flags.ceilCloth=1;}
+        burst(tx,ty,16,['R','B','Y','K']);bump();
+        for(const ac of inside.actors){ac.pose='cheer';ac.t=0.9;}
+      }});
+    });
+  }else if(k){inside.newType=CONV[k];inside.newT=1;inside.newUsed=false;}
+}
+function learnIn(vis,h){later(0.3,()=>{const gst=gestureOf(h);const was=vis.learned[gst];vis.learned[gst]=true;vis.last=gst;bump();if(!was)SND.learn();if(inside&&inside.actors[0]){const a=inside.actors[0];burst(a.x,a.y-IL.DI,8,gst==='sit'?['B','K']:['Y','K']);}});}
+function exitHouse(toSide){
+  if(trans||!inside)return;
+  const h=inside.h,vis=inside.vis;inside.doorOpen=1;SND.door();
+  if(toSide!=null){const nh=houseAt(toSide);if(!nh)return;inside.sideUsed=true;
+    trans={t:0,dur:0.8,dir:'side',rect:{x:0,y:0,w:W,h:H},swapped:false,swap:()=>{noteArrive(vis,toSide);setupInside(nh,vis,true);SND.katan(1.2);}};return;}
+  const r=houseRect(h);
+  trans={t:0,dur:0.8,dir:'out',rect:r,swapped:false,swap:()=>{
+    const hh=inside.h;view='town';inside=null;
+    vis.x=lotXY(hh.lot).x+(vis.id-1)*0.17*S;vis.y=lotXY(hh.lot).y+0.1*S;vis.restLot=hh.lot;vis.restDx=(vis.id-1)*0.17;vis.restDy=0.1;noteArrive(vis,hh.lot);
+    vis.q=[AQ.pose(vis.last==='sit'?'sit':'carry',0.9,{seatH:0.02}),AQ.pose('wave',0.6)];vis.touchT=now;
+    if(vis.garment){SND.pon(PITCH[vis.garment]);burst(vis.x,vis.y-D*0.5,8);}
+    SND.katan(0.9);
+  }};
+}
+function updateInside(dt){
+  const I=inside;I.t+=dt;
+  if(I.newT!=null&&I.newT<1)I.newT+=dt*2;
+  I.cloth.ph+=dt*(2.2+I.cloth.amp*2);I.cloth.amp=Math.max(0.12,I.cloth.amp-dt*0.25);
+  if(I.press){I.press.a=Math.max(0,I.press.a-dt*4);if(I.press.a<=0)I.press=null;}
+  if(I.win.wig>0)I.win.wig=Math.max(0,I.win.wig-dt*1.6);
+  for(const b of I.fly)b.t+=dt;
+  for(let i=I.fly.length-1;i>=0;i--)if(I.fly[i].t>I.fly[i].dur+1.9)I.fly.splice(i,1);
+  for(const a of I.actors){
+    if(a.jump<0||a.jv){a.jv+=IL.DI*10*dt;a.jump+=a.jv*dt;if(a.jump>=0){a.jump=0;a.jv=0;}}
+    if(a.q.length){const s=a.q[0];
+      if(s.k==='walk'){const dx=s.x-a.x;const sp=IL.DI*1.6;if(Math.abs(dx)<=sp*dt){a.x=s.x;a.q.shift();a.pose='stand';}else{a.x+=Math.sign(dx)*sp*dt;a.face=Math.sign(dx);a.ph+=dt*9;a.pose='walk';}}
+      else if(s.k==='pose'){if(s.t0==null){s.t0=0;a.pose=s.p;a.poseOpt=s.opt||{};if(s.p==='sit')SND.sit();}s.t0+=dt;if(s.t0>=s.t){a.q.shift();a.pose='stand';}}
+      else if(s.k==='fn'){a.q.shift();s.f(a);}
+    }else if(a.t>0){a.t-=dt;if(a.t<=0)a.pose='stand';}
+  }
+  // residents act on their own
+  I.autoT-=dt;
+  if(I.autoT<=0){I.autoT=4+rng()*3;
+    const free=I.actors.filter(a=>!a.q.length&&!a.vis);if(free.length){const a=pick(free);const sl=interiorSlots(I.h);
+      const r=rng();
+      if(r<0.3&&I.h.items.cloth>0){a.q=[{k:'walk',x:W*0.5+(rng()-0.5)*W*0.15},{k:'fn',f:()=>{a.jv=-IL.DI*3;}},{k:'pose',p:'hang',t:0.8}];}
+      else if(r<0.7&&sl.length){const s=pick(sl);if(SEATS[s.t])a.q=[{k:'walk',x:s.x},{k:'pose',p:'sit',t:2.5,opt:{seatH:seatHFor(s.t)}}];else a.q=[{k:'walk',x:s.x-s.s*0.5},{k:'pose',p:'carry',t:1.4}];}
+      else{const v=I.actors[0];a.q=[{k:'walk',x:v.x+(a.x>v.x?1:-1)*IL.DI*0.6},{k:'pose',p:'wave',t:1.2}];}}}
+}
+function seatHFor(t){return t==='chair'?0.42*IL.I/IL.DI:t==='seat'?0.42*IL.I/IL.DI:t==='bench'?0.58*IL.I/IL.DI:0.3*IL.I/IL.DI;}
+function useItem(sl){
+  const I=inside;I.anyUsed=true;if(sl.t===I.newType)I.newUsed=true;I.press={t:sl.t,a:1};
+  const free=I.actors.filter(a=>!a.q.length);const act=free.length?free:I.actors;
+  if(SEATS[sl.t]){
+    const a=act.reduce((b,c)=>Math.abs(c.x-sl.x)<Math.abs(b.x-sl.x)?c:b);
+    a.q=[{k:'walk',x:sl.x},{k:'pose',p:'sit',t:3,opt:{seatH:seatHFor(sl.t)}}];SND.pon(0.9);
+    // the others gather too
+    I.actors.filter(o=>o!==a&&!o.q.length).forEach((o,i)=>{o.q=[{k:'walk',x:sl.x+(i+1)*IL.DI*0.45*(sl.x>W/2?-1:1)},{k:'pose',p:'clap',t:1}];});
+  }else if(sl.t==='desk'){
+    const a=act[0];a.q=[{k:'walk',x:sl.x-sl.s*0.55},{k:'pose',p:'carry',t:0.4},{k:'fn',f:()=>{I.stack=(I.stack+1)%5;SND.note(I.stack);burst(sl.x,sl.y-sl.s*0.8,5,['Y','K']);}},{k:'pose',p:'sit',t:1.6,opt:{seatH:0.3}}];
+  }else{
+    // toybox / stored / shelfdeck : blocks pop out and stack
+    const n=3;for(let i=0;i<n;i++){I.fly.push({x0:sl.x,y0:sl.y-sl.s*0.6,x1:sl.x+(sl.x>W*0.5?-1:1)*sl.s*(0.9+i*0.0),y1:IL.floor-sl.s*0.13-i*sl.s*0.26,s:sl.s*0.26,arc:sl.s*(1+i*0.3),t:-i*0.18,dur:0.5});
+      later(0.5+i*0.18,()=>SND.note(i+2));}
+    const a=act[0];a.q=[{k:'walk',x:sl.x+(sl.x>W*0.5?-1:1)*sl.s*1.4},{k:'pose',p:'carry',t:1.2},{k:'pose',p:'cheer',t:0.6}];
+    SND.pick(1.2);
+  }
+}
+
+// =====================================================================
+//  save / load (local only, validated)
+// =====================================================================
+function serialize(){
+  return JSON.stringify({v:2,rev:ST.rev,bench:ST.bench,nextHid:ST.nextHid,
+    houses:ST.houses.map(h=>({id:h.id,lot:h.lot,kind:h.kind,roof:h.roof,room:h.room,shed:h.shed,rest:h.rest,bench:h.bench,items:h.items,made:h.made,owner:h.owner})),
+    corridors:ST.corridors,trips:ST.trips,garments:ST.garments,
+    dolls:dolls.map(d=>({id:d.id,arrived:d.arrived,garment:d.garment,learned:d.learned,last:d.last,home:d.home,fx:clamp(d.x/W,0,1),fy:clamp(d.y/Math.max(1,TH),0,1),lot:d.restLot==null?-1:d.restLot})),
+    flags:ST.flags});
+}
+function isInt(n,a,b){return Number.isInteger(n)&&n>=a&&n<=b;}
+function validate(o){
+  if(!o||typeof o!=='object')return null;
+  if(o.v===1)return migrate1(o);
+  if(o.v!==2)return null;
+  const st=newState();
+  if(!Array.isArray(o.houses)||o.houses.length>LOTS)return null;
+  const used={},ids={};
+  for(const h of o.houses){
+    if(!h||typeof h!=='object')return null;
+    if(!isInt(h.lot,0,LOTS-1)||used[h.lot])return null;used[h.lot]=1;
+    if(['roof','room','shed','rest'].indexOf(h.kind)<0)return null;
+    const nh=mkHouse(h.lot,h.kind);nh.id=isInt(h.id,1,1e6)&&!ids[h.id]?h.id:0;if(!nh.id)return null;ids[nh.id]=1;
+    nh.roof=!!h.roof;nh.room=!!h.room;nh.shed=!!h.shed;nh.rest=!!h.rest;nh.bench=!!h.bench;
+    if(!nh.roof&&!nh.room&&!nh.shed&&!nh.rest)return null;
+    if(h.items&&typeof h.items==='object')for(const k of ITEM_KEYS){const n=h.items[k];nh.items[k]=isInt(n,0,9)?n:0;}
+    if(h.made&&typeof h.made==='object')for(const k of GTYPES)nh.made[k]=!!h.made[k];
+    nh.owner=isInt(h.owner,-1,2)?h.owner:-1;nh.anim=1;
+    st.houses.push(nh);
+  }
+  st.nextHid=Math.max(1,...st.houses.map(h=>h.id+1));
+  st.bench=isInt(o.bench,0,LOTS-1)?o.bench:1;
+  if(Array.isArray(o.corridors))for(const c of o.corridors){if(Array.isArray(c)&&c.length===2&&isInt(c[0],0,5)&&isInt(c[1],0,5)&&c[0]<c[1]&&neighbors(c[0],c[1])&&used[c[0]]&&used[c[1]]&&!st.corridors.some(e=>e[0]===c[0]&&e[1]===c[1]))st.corridors.push([c[0],c[1]]);}
+  if(o.trips&&typeof o.trips==='object')for(const k in o.trips){if(/^[0-5]-[0-5]$/.test(k)&&isInt(o.trips[k],0,999))st.trips[k]=o.trips[k];}
+  const worn={};
+  if(!Array.isArray(o.dolls)||o.dolls.length!==3)return null;
+  for(let i=0;i<3;i++){const s=o.dolls[i];if(!s||s.id!==i)return null;const d=st.dolls[i];
+    d.arrived=i===0?true:!!s.arrived;
+    d.garment=(GTYPES.indexOf(s.garment)>=0&&!worn[s.garment])?s.garment:null;if(d.garment)worn[d.garment]=1;
+    if(s.learned&&typeof s.learned==='object'){d.learned.sit=!!s.learned.sit;d.learned.carry=!!s.learned.carry;}
+    d.last=(s.last==='sit'||s.last==='carry')?s.last:null;
+    d.home=(isInt(s.home,1,1e6)&&ids[s.home])?s.home:-1;
+    d.fx=typeof s.fx==='number'&&isFinite(s.fx)?clamp(s.fx,0,1):0.5;d.fy=typeof s.fy==='number'&&isFinite(s.fy)?clamp(s.fy,0.15,1):0.9;
+    d.lot=isInt(s.lot,0,5)&&used[s.lot]?s.lot:-1;}
+  if(o.garments&&typeof o.garments==='object')for(const k of GTYPES){const g=o.garments[k];if(g&&typeof g==='object'){st.garments[k].owner=isInt(g.owner,-1,2)?g.owner:-1;st.garments[k].homes=Array.isArray(g.homes)?g.homes.filter(x=>ids[x]).slice(0,6):[];}}
+  if(o.flags&&typeof o.flags==='object'){const f=o.flags;
+    if(f.worn&&typeof f.worn==='object')for(const k of GTYPES)st.flags.worn[k]=isInt(f.worn[k],0,1e6)?f.worn[k]:0;
+    st.flags.enteredAny=f.enteredAny?1:0;
+    if(f.entered&&typeof f.entered==='object')for(const k in f.entered)if(ids[k])st.flags.entered[k]=1;
+    st.flags.pocketHand=f.pocketHand?1:0;
+    if(f.dressed&&typeof f.dressed==='object')for(let i=0;i<3;i++)st.flags.dressed[i]=f.dressed[i]?1:0;
+    st.flags.shared=isInt(f.shared,0,1e6)?f.shared:0;st.flags.stopby=isInt(f.stopby,0,1e6)?f.stopby:0;
+    if(f.delivered&&typeof f.delivered==='object')for(const k of ITEM_KEYS)if(f.delivered[k])st.flags.delivered[k]=1;
+    st.flags.chairs=isInt(f.chairs,0,1e6)?f.chairs:0;st.flags.shedBuilt=f.shedBuilt?1:0;st.flags.ceilCloth=f.ceilCloth?1:0;}
+  st.rev=isInt(o.rev,0,1e9)?o.rev:1;st.savedRev=st.rev;st.saved=true;
+  return st;
+}
+function migrate1(o){
+  // old format: {v:1, houses:[{lot, type:'cape'|'jacket'|'vest'}]}
+  if(!Array.isArray(o.houses))return null;
+  const st=newState();const used={};
+  for(const h of o.houses){if(!h||!isInt(h.lot,0,5)||used[h.lot])continue;used[h.lot]=1;
+    const kind=h.type==='cape'?'roof':h.type==='jacket'?'room':h.type==='vest'?'shed':null;if(!kind)continue;
+    const nh=mkHouse(h.lot,kind);nh.id=st.nextHid++;nh.anim=1;nh.roof=kind==='roof';nh.room=kind==='room';nh.shed=kind==='shed';nh.bench=h.lot===1;st.houses.push(nh);}
+  if(!st.houses.length)return null;
+  st.dolls[1].arrived=true;if(st.houses.length>=2)st.dolls[2].arrived=true;
+  st.rev=1;st.savedRev=-1;st.saved=false;
+  return st;
+}
+let storageOK=true;
+function tryLoad(){
+  let raw=null;
+  try{raw=window.localStorage.getItem(SAVE_KEY);}catch(e){storageOK=false;return null;}
+  if(!raw)return null;
+  let o=null;try{o=JSON.parse(raw);}catch(e){return null;}
+  try{return validate(o);}catch(e){return null;}
+}
+function trySave(){
+  try{const s=serialize();window.localStorage.setItem(SAVE_KEY,s);const back=window.localStorage.getItem(SAVE_KEY);return back===s;}catch(e){return false;}
+}
+function startSave(){
+  if(mdl.state!=='base')return;
+  mdl.state='fly';mdl.t=0;mdl.fx0=mdl.x;mdl.fy0=mdl.y;SND.pick(1.2);
+}
+function finishSave(){
+  const ok=trySave();
+  if(ok){ST.savedRev=ST.rev;ST.saved=true;mdl.state='shelf';SND.katan(1.3);SND.chime();burst(LY.shelf.x,LY.shelf.y-S*0.1,14,['R','B','Y','K']);later(0.4,()=>{if(mdl.state==='shelf')mdl.state='base';});}
+  else{mdl.state='drop';mdl.t=0;deco.shelf.wig=0.6;SND.boing();}
+  window.__tkLastSave=ok;
+}
+function applyLoaded(st){
+  ST=st;initDolls();
+  for(const d of dolls){d.x=d.fx*W;d.y=d.fy*TH;if(d.lot>=0){const p=lotXY(d.lot);d.x=p.x+(d.id-1)*0.17*S;d.y=p.y+0.1*S;d.restLot=d.lot;d.restDx=(d.id-1)*0.17;d.restDy=0.1;d.atLot=d.lot;}
+    if(!d.arrived){d.x=-D;d.y=LY.streetY;}
+    if(d.garment)GR[d.garment].on=d.id;}
+  for(const h of ST.houses){h.anim=1;}
+  if(ST.houses.length&&!dolls[1].arrived){dolls[1].arrived=true;const h=ST.houses[0];const p=lotXY(h.lot);dolls[1].x=p.x;dolls[1].y=p.y+0.1*S;}
+}
+
+// =====================================================================
+//  input
+// =====================================================================
+function pt(e){const r=cv.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top};}
+function inR(p,x,y,w,h,pad){pad=pad||0;return p.x>=x-pad&&p.x<=x+w+pad&&p.y>=y-pad&&p.y<=y+h+pad;}
+function garmentRackHit(p){
+  let best=null,bd=1e9;
+  for(const k of GTYPES){const g=GR[k];if(g.on>=0)continue;const s=rackSize(k);const dx=p.x-g.x,dy=p.y-(g.y-g.lift);
+    if(Math.abs(dx)<s*0.62&&Math.abs(dy)<s*0.58){const dd=Math.hypot(dx,dy);if(dd<bd){bd=dd;best=k;}}}
+  return best;
+}
+function dollHit(p){
+  let best=null,bd=1e9,zone=null;
+  for(const d of dolls){if(!d.arrived||d.x<-D*0.3||d.x>W+D*0.3)continue;
+    const dx=p.x-d.x,dy=p.y-d.y;
+    if(Math.abs(dx)<Math.max(D*0.42,26)&&dy<D*0.15&&dy>-D*1.15){const dd=Math.abs(dx)+Math.abs(dy+D*0.5)*0.5;if(dd<bd){bd=dd;best=d;
+      zone=(d.garment&&Math.abs(dx)<D*0.3&&dy<-D*0.24&&dy>-D*0.7)?'garment':'doll';}}}
+  return best?{d:best,zone}:null;
+}
+function houseHit(p){for(const h of ST.houses){const r=houseRect(h);if(inR(p,r.x,r.y,r.w,r.h,4))return h;}return null;}
+function lotDropAt(p){
+  let best=null,bd=1e9;
+  for(let i=0;i<LOTS;i++){const l=lotXY(i);const cxp=l.x,cyp=l.y-S*0.35;const dx=Math.abs(p.x-cxp),dy=Math.abs(p.y-cyp);
+    if(dx<Math.max(S*0.65,LY.cw*0.48)&&dy<Math.max(S*0.75,LY.ch*0.5)){const dd=Math.hypot(dx,dy);if(dd<bd){bd=dd;best=i;}}}
+  return best;
+}
+function dollNear(p,except,need){
+  let best=null,bd=Math.max(D*0.95,64);
+  for(const d of dolls){if(!d.arrived||d===except)continue;if(need&&!need(d))continue;const t=dollTorso(d);const dd=Math.hypot(p.x-t.x,p.y-t.y);if(dd<bd){bd=dd;best=d;}}
+  return best;
+}
+function selectedGarment(){for(const k of GTYPES)if(GR[k].sel)return k;return null;}
+function deselectAll(){for(const k of GTYPES){GR[k].sel=false;}}
+
+function onDown(e){
+  e.preventDefault();
+  audioStart();
+  if(ptr){return;} // ignore additional fingers
+  const p=pt(e);
+  lastInput=now;demo=null;demoShown=false;
+  if(trans)return;
+  try{cv.setPointerCapture(e.pointerId);}catch(_){}
+  ptr={id:e.pointerId,x0:p.x,y0:p.y,x:p.x,y:p.y,t0:now,moved:false,kind:null,ref:null,lx:p.x,ly:p.y};
+  if(view==='in'){ptr.kind='in';interiorDown(p);return;}
+  // 1. garments on rack
+  const gk=garmentRackHit(p);
+  if(gk){const g=GR[gk];const wasSel=g.sel;deselectAll();g.sel=wasSel;g.drag=true;g.sq=-0.28;g.sqv=0;g.fold=1;ptr.kind='garment';ptr.ref=gk;ptr.from='rack';ptr.wasSel=wasSel;ptr.ox=g.x-p.x;ptr.oy=g.y-p.y;g.lift=rackSize(gk)*0.15;SND.pick(PITCH[gk]);SND.flap(PITCH[gk]);return;}
+  // 2. block (direct hit wins over a doll walking past the box)
+  if(blk.state==='box'&&Math.hypot(p.x-blk.x,p.y-blk.y)<Math.max(S*0.2,24)){deselectAll();blk.state='drag';ptr.kind='block';SND.pick(PITCH.block);return;}
+  // 2b. dolls
+  const dh=dollHit(p);
+  if(dh){const d=dh.d;d.touchT=now;active=d.id;
+    const sg=selectedGarment();
+    if(sg){dress(d,sg);ptr.kind='none';return;}
+    if(dh.zone==='garment'){const k=d.garment;const g=GR[k];ptr.kind='garment';ptr.ref=k;ptr.from='doll';ptr.doll=d;g.drag=true;g.x=d.x;g.y=d.y-D*0.47;ptr.ox=g.x-p.x;ptr.oy=g.y-p.y;g.sq=-0.2;g.fold=1;d.sqz=0.12;SND.flap(PITCH[k]);return;}
+    ptr.kind='doll';ptr.ref=d;d.sqz=0.18;SND.pick(0.9);return;}
+  // 3. block
+  if(blk.state==='box'&&Math.hypot(p.x-blk.x,p.y-blk.y)<Math.max(S*0.32,34)){deselectAll();blk.state='drag';ptr.kind='block';SND.pick(PITCH.block);return;}
+  // 4. model
+  if(mdl.state==='base'&&ST.houses.length&&Math.hypot(p.x-mdl.x,p.y-(mdl.y-S*0.1))<Math.max(S*0.4,36)){deselectAll();ptr.kind='model';mdl.state='drag';SND.pick(1.25);return;}
+  // 5. houses
+  const h=houseHit(p);
+  if(h){ptr.kind='house';ptr.ref=h;h.squash=0.06;SND.wig();return;}
+  // 6. small wiggles for unrelated things
+  const sg=selectedGarment();
+  if(Math.hypot(p.x-LY.sun.x,p.y-LY.sun.y)<LY.sun.r*1.8){deco.sun.wig=0.5;SND.wig();}
+  else if(Math.hypot(p.x-LY.cloud.x,p.y-LY.cloud.y)<LY.cloud.r*2.2){deco.cloud.wig=0.5;SND.wig();}
+  else if(Math.abs(p.x-LY.shelf.x)<LY.shelf.w*0.55&&Math.abs(p.y-LY.shelf.y)<S*0.3){deco.shelf.wig=0.5;SND.wig();}
+  else{const li=lotDropAt(p);if(li!=null&&!houseAt(li)&&Math.abs(p.y-lotXY(li).y)<S*0.4){if(li===ST.bench)deco.bench.wig=0.5;else deco.lots[li]=0.5;SND.wig();}}
+  if(sg){deselectAll();}
+  ptr.kind='none';
+}
+function onMove(e){
+  if(!ptr||e.pointerId!==ptr.id)return;e.preventDefault();
+  const p=pt(e);const dx=p.x-ptr.x0,dy=p.y-ptr.y0;
+  if(!ptr.moved&&Math.hypot(dx,dy)>10)ptr.moved=true;
+  const vx=p.x-ptr.lx,vy=p.y-ptr.ly;ptr.lx=p.x;ptr.ly=p.y;ptr.x=p.x;ptr.y=p.y;
+  if(ptr.kind==='garment'){const g=GR[ptr.ref];
+    if(ptr.from==='doll'&&g.on>=0&&ptr.moved){const d=ptr.doll;const far=Math.hypot(p.x-d.x,p.y-(d.y-D*0.47));if(far>D*0.45){undress(d);g.drag=true;}}
+    g.x=p.x+ptr.ox;g.y=p.y+ptr.oy;
+    const sp=Math.hypot(vx,vy);if(sp>0.5){g.ang=Math.atan2(vy,vx);g.str=clamp(g.str*0.6+sp*0.012,0,0.35);}
+    if(ptr.moved&&g.on<0){const t=dollNear({x:g.x,y:g.y},null);for(const d of dolls)d.reachAt=null;if(t){t.reachAt={x:g.x,y:g.y};if(t.pose==='stand'&&!t.q.length)t.pose='reach';}}
+  }else if(ptr.kind==='doll'&&ptr.moved){const d=ptr.ref;if(!d.drag){d.drag=true;d.q=[];d.pose='hang';d.restLot=null;}d.x=p.x;d.y=p.y+D*0.55;}
+  else if(ptr.kind==='block'){blk.x=p.x;blk.y=p.y;}
+  else if(ptr.kind==='model'){mdl.x=p.x;mdl.y=p.y+S*0.1;}
+}
+function onUp(e,cancel){
+  if(!ptr||e.pointerId!==ptr.id)return;e.preventDefault();
+  const p=ptr;ptr=null;lastInput=now;
+  try{cv.releasePointerCapture(e.pointerId);}catch(_){}
+  for(const d of dolls){d.reachAt=null;}
+  if(p.kind==='in'){if(!cancel)interiorUp(p);return;}
+  if(p.kind==='garment'){const g=GR[p.ref];g.drag=false;g.sqv+=6;g.str=0;
+    if(cancel){if(g.on<0){g.sel=false;}return;}
+    if(!p.moved){
+      if(p.from==='rack'){g.sel=!p.wasSel;if(g.sel){g.wig=0.3;}SND.flap(PITCH[p.ref]);}
+      else{const d=p.doll;d.q.unshift(AQ.pose('wave',0.6));g.wig=0.4;}
+      return;}
+    const t=dollNear({x:g.x,y:g.y},null);
+    if(t&&g.on!==t.id){dress(t,p.ref);return;}
+    if(g.on>=0)return; // released back on the same doll
+    g.sel=false;SND.flap(PITCH[p.ref]);return;
+  }
+  if(p.kind==='doll'){const d=p.ref;
+    if(!d.drag){d.q.unshift(AQ.pose('wave',0.7));d.jv=-S*2.2;SND.note(d.id+2);return;}
+    d.drag=false;d.pose='stand';
+    if(cancel){d.y=clamp(d.y,LY.lotTop+D*0.3,TH-4);return;}
+    d.x=clamp(d.x,D*0.3,W-D*0.3);d.y=clamp(d.y,LY.lotTop+D*0.5,TH-4);
+    const li=lotDropAt({x:d.x,y:d.y-D*0.4});
+    SND.sit();
+    if(li!=null){d.jobPending=!!(d.garment||d.pocket||d.hand);d.q=[AQ.walk(doorSpot(d,li),{fast:true}),AQ.fn(()=>arriveAct(d,li))];}
+    else if(d.jobPending){d.q=[AQ.pose('think',0.4),AQ.fn(()=>planJob(d))];}
+    return;
+  }
+  if(p.kind==='block'){
+    if(cancel){blk.state='box';blk.x=LY.box.x;blk.y=LY.box.y-S*0.22;return;}
+    const t=dollNear({x:blk.x,y:blk.y},null,d=>d.garment==='vest'&&!d.pocket)||dollNear({x:blk.x,y:blk.y},null);
+    if(t&&t.garment==='vest'&&!t.pocket){blk.state='fly';const bx=blk.x,by=blk.y;
+      ghost({kind:'block',x0:bx,y0:by,x1:t.x,y1:t.y-D*0.36,s0:S*0.22,s1:S*0.14,dur:0.3,cb:()=>{t.pocket='block';SND.pon(PITCH.block);t.sqz=0.2;}});blockBack();
+      ST.flags.pocketHand=1;t.q=[AQ.pose('pocket',0.6)];t.touchT=now;active=t.id;t.jobPending=true;
+      t.q.push(AQ.fn(()=>{const home=houseById(t.home);const pos={x:t.x,y:t.y};const h=(home&&home.room)?home:(nearestHouse(pos,h=>h.room)||(home&&!home.shed?home:null)||nearestHouse(pos,h=>h.roof||h.rest));
+        if(h)goLot(t,h.lot);else{const em=emptyLots();if(em.length)goLot(t,nearestLot(pos,em));else{const s=nearestHouse(pos);if(s)goLot(t,s.lot);else t.jobPending=false;}}}));
+      bump();return;}
+    if(t){t.q.unshift(AQ.pose('shake',0.6));SND.boing();}
+    blk.state='box';blk.x=LY.box.x;blk.y=LY.box.y-S*0.22;blk.wig=0.5;return;
+  }
+  if(p.kind==='model'){
+    if(cancel){mdl.state='base';return;}
+    const nearShelf=Math.hypot(mdl.x-LY.shelf.x,mdl.y-LY.shelf.y)<Math.max(S*1.1,120);
+    if(!p.moved||nearShelf){mdl.state='base';startSave();}else{mdl.state='base';mdl.wig=0.5;SND.wig();}
+    return;
+  }
+  if(p.kind==='house'){if(cancel)return;if(!p.moved)enterHouse(p.ref);return;}
+}
+function interiorDown(p){
+  const I=inside;if(!I)return;
+  const dr=IL.door;
+  if(inR(p,dr.x,dr.y,dr.w,dr.h,14)){ptr.ref={t:'door'};I.doorOpen=0.3;SND.wig();return;}
+  if(I.side!=null){const sd=IL.side;if(inR(p,sd.x,sd.y,sd.w,sd.h,14)){ptr.ref={t:'side'};SND.wig();return;}}
+  // cloth
+  if(I.h.items.cloth>0){const cw=Math.min(W*0.5,H*0.5)*0.9;const ay=IL.ceil+H*0.02+cw*0.12;if(Math.abs(p.x-W*0.5)<cw*0.5&&p.y>ay-20&&p.y<ay+cw*0.55){ptr.ref={t:'cloth'};I.cloth.amp=Math.min(1.4,I.cloth.amp+0.3);SND.flap(1.3);return;}}
+  for(const sl of interiorSlots(I.h)){if(Math.abs(p.x-sl.x)<sl.s*0.62&&p.y>sl.y-sl.s*1.0&&p.y<sl.y+sl.s*0.25){ptr.ref={t:'item',sl};I.press={t:sl.t,a:1};SND.pick(1);return;}}
+  for(const a of I.actors){if(Math.abs(p.x-a.x)<IL.DI*0.35&&p.y<a.y+10&&p.y>a.y-IL.DI){ptr.ref={t:'actor',a};return;}}
+  const ww=Math.min(W,H)*0.2;if(Math.abs(p.x-W*0.5)<ww*0.6&&Math.abs(p.y-(IL.ceil+H*(PORT?0.33:0.24)))<ww*0.6){I.win.wig=0.5;SND.wig();}
+  ptr.ref=null;
+}
+function interiorUp(p){
+  const I=inside;if(!I||!p.ref)return;
+  if(I.doorOpen<1)I.doorOpen=0;
+  const r=p.ref;
+  if(r.t==='door'){exitHouse(null);return;}
+  if(r.t==='side'){exitHouse(I.side);return;}
+  if(r.t==='cloth'){I.anyUsed=true;if(I.newType==='cloth')I.newUsed=true;I.cloth.amp=1.5;SND.whoosh(1.2);
+    I.actors.forEach((a,i)=>{a.q=[{k:'walk',x:W*0.5+(i-1)*IL.DI*0.55},{k:'fn',f:()=>{a.jv=-IL.DI*3.2;SND.note(i+3);}},{k:'pose',p:'hang',t:0.7},{k:'fn',f:()=>{a.jv=-IL.DI*2.4;}},{k:'pose',p:'cheer',t:0.6}];});return;}
+  if(r.t==='item'){useItem(r.sl);return;}
+  if(r.t==='actor'){const a=r.a;a.jv=-IL.DI*2.2;a.pose='wave';a.t=0.8;SND.note(a.d.id+1);return;}
+}
+cv.addEventListener('pointerdown',onDown,{passive:false});
+cv.addEventListener('pointermove',onMove,{passive:false});
+cv.addEventListener('pointerup',e=>onUp(e,false),{passive:false});
+cv.addEventListener('pointercancel',e=>onUp(e,true),{passive:false});
+cv.addEventListener('lostpointercapture',e=>{if(ptr&&e.pointerId===ptr.id)onUp(e,true);});
+const stop=e=>{e.preventDefault();};
+document.addEventListener('touchstart',stop,{passive:false});
+document.addEventListener('touchmove',stop,{passive:false});
+document.addEventListener('touchend',stop,{passive:false});
+document.addEventListener('gesturestart',stop,{passive:false});
+document.addEventListener('gesturechange',stop,{passive:false});
+document.addEventListener('contextmenu',stop,{passive:false});
+document.addEventListener('dblclick',stop,{passive:false});
+document.addEventListener('selectstart',stop,{passive:false});
+window.addEventListener('wheel',stop,{passive:false});
+
+// =====================================================================
+//  render
+// =====================================================================
+function drawGhost(g){
+  const t=clamp(g.t/g.dur,0,1);const e=easeIO(t);
+  const x=lerp(g.x0,g.x1,e),y=lerp(g.y0,g.y1,e)-Math.sin(t*Math.PI)*(g.arc||0);
+  const s=lerp(g.s0,g.s1,e);
+  cx.save();cx.translate(x,y);
+  if(g.flip){cx.scale(1,Math.cos(t*Math.PI*2)*0.5+0.5>0.15?Math.cos(t*Math.PI*2):0.15);}
+  if(g.kind==='garment')drawGarmentLocal(g.type,s,1,0,false);
+  else if(g.kind==='block')drawBlock(0,0,s);
+  else if(g.kind==='item')drawItem(g.type,0,s*0.4,s);
+  cx.restore();
+}
+function drawTown(){
+  drawTownBG();lw=LW;
+  // trail marks (shape footprints)
+  for(const m of trail){const k=1-m.t/1.6;const s=S*0.06*k;if(s<1)continue;
+    if(m.k==='cape')poly([m.x-s,m.y+s*0.6,m.x+s,m.y+s*0.6,m.x,m.y-s],C.B);else if(m.k==='jacket')rct(m.x-s*0.8,m.y-s*0.8,s*1.6,s*1.6,C.W);else circ(m.x,m.y,s*0.8,C.Y);}
+  // hint rays behind the hinted town object
+  if(hint&&!demo&&(hint.kind==='house'||hint.kind==='block'||hint.kind==='model'||(hint.kind==='garment'&&GR[hint.ref].on>=0))){const hp=hintPoint(hint);if(hp)drawRays(hp.x,hp.y,hp.r);}
+  // depth sorted
+  const L=[];
+  for(const h of ST.houses){const p=lotXY(h.lot);L.push({y:p.y-0.001,f:()=>{drawHouse(h);drawHouseItems(h);}});}
+  for(const d of dolls){if(!d.arrived||d.drag)continue;L.push({y:d.y,f:()=>drawDollTown(d)});}
+  L.sort((a,b)=>a.y-b.y);for(const o of L)o.f();
+  // block in box
+  if(blk.state==='box'){const isH=hint&&hint.kind==='block';const hb=isH?-Math.abs(Math.sin(now*5))*S*0.08:0;const pp=blk.pop!=null&&blk.pop<1?backOut(blk.pop):1;
+    cx.save();cx.translate(blk.x,blk.y+hb);cx.rotate(wigOf(blk)*0.5);cx.scale(pp,pp);drawBlock(0,0,S*0.22);cx.restore();}
+  // model at base
+  if(ST.houses.length&&(mdl.state==='base'||mdl.state==='drop')&&!(ST.saved&&ST.rev===ST.savedRev)){
+    let x=mdl.x,y=mdl.y;const isH=hint&&hint.kind==='model';if(isH)y-=Math.abs(Math.sin(now*5))*S*0.08;
+    if(mdl.state==='drop'){const t=mdl.t;x=lerp(LY.shelf.x,LY.mbase.x,t);y=lerp(LY.shelf.y,LY.mbase.y,t)-Math.sin(t*Math.PI)*S*0.3;}
+    cx.save();cx.translate(x,y);cx.rotate(wigOf(mdl)*0.4);drawModel(0,0,Math.max(S*0.8,72));cx.restore();}
+}
+function drawDollTown(d){drawDoll(d,d.x,d.y,D);}
+function drawOverlay(){
+  lw=LW;
+  // dragged things on top
+  for(const d of dolls)if(d.drag&&d.arrived)drawDoll(d,d.x,d.y,D);
+  if(view==='town'){
+    drawWardrobe();
+    // hint rays behind garments
+    const hp=hint?hintPoint(hint):null;
+    if(hp&&!demo&&(hint.kind==='garment'&&GR[hint.ref].on<0))drawRays(hp.x,hp.y,hp.r);
+    for(const k of GTYPES)if(!GR[k].drag)drawGarmentFree(k);
+    for(const k of GTYPES)if(GR[k].drag)drawGarmentFree(k);
+    if(blk.state==='drag'){cx.save();cx.translate(blk.x,blk.y);cx.scale(1.15,1.15);drawBlock(0,0,S*0.22);cx.restore();}
+    if(mdl.state==='drag'){drawModel(mdl.x,mdl.y,Math.max(S*0.8,72));}
+    if(mdl.state==='fly'){const t=easeIO(mdl.t);drawModel(lerp(mdl.fx0,LY.shelf.x,t),lerp(mdl.fy0,LY.shelf.y,t)-Math.sin(t*Math.PI)*S*0.6,lerp(Math.max(S*0.8,72),LY.shelf.w*0.8,t));}
+  }else if(view==='in'){
+  }
+  for(const g of ghosts){if(view==='in'&&!g.inside)continue;if(view==='town'&&g.inside)continue;drawGhost(g);}
+  for(const p of parts){const k=1-p.life/p.max;const s=p.s*k;cx.save();cx.translate(p.x,p.y);cx.rotate(p.r);cx.fillStyle=C[p.c];if(p.tri){cx.beginPath();cx.moveTo(0,-s);cx.lineTo(s,s);cx.lineTo(-s,s);cx.closePath();cx.fill();}else cx.fillRect(-s,-s*0.6,s*2,s*1.2);cx.restore();}
+  drawDemo();
+}
+function drawRaysSmall(hp){drawRays(hp.x,hp.y,hp.r);}
+function drawTrans(){
+  if(!trans)return;
+  const t=trans.t;const r=trans.rect;
+  lw=LW*1.4;
+  if(t<0.5){const k=easeIO(t/0.5);const x=lerp(r.x,0,k),y=lerp(r.y,0,k),w=lerp(r.w,W,k),h=lerp(r.h,H,k);
+    rct(x,y,w,h,C.W);
+    // the fold flap (door) swinging
+    const fw=w*0.22,fh=h*0.4;poly([x+w/2-fw/2,y+h,x+w/2+fw/2,y+h,x+w/2+fw/2,y+h-fh*(1-k),x+w/2-fw/2,y+h-fh*(1-k)],trans.dir==='out'?C.B:C.R);}
+  else{const k=easeIO((t-0.5)/0.5);
+    // white panel folds down (pattan)
+    const h=H*(1-k);rct(-lw,-lw,W+lw*2,h,C.W);if(h>2)ln(0,h,W,h,lw*1.6);}
+}
+function render(){
+  cx.setTransform(DPR,0,0,DPR,0,0);
+  cx.lineJoin='round';cx.lineCap='round';
+  if(view==='town')drawTown();else if(inside)drawInterior();
+  drawOverlay();
+  drawTrans();
+}
+
+// =====================================================================
+//  loop (requestAnimationFrame only; stops when hidden)
+// =====================================================================
+let raf=0,lastT=0,running=false;
+function frame(ts){
+  raf=0;if(!running)return;
+  const dt=lastT?Math.min(0.05,(ts-lastT)/1000):0.016;lastT=ts;
+  try{update(dt);render();}catch(err){if(!window.__tkErr)window.__tkErr=String(err&&err.stack||err);}
+  raf=requestAnimationFrame(frame);
+}
+function startLoop(){if(running)return;running=true;lastT=0;raf=requestAnimationFrame(frame);}
+function stopLoop(){running=false;if(raf)cancelAnimationFrame(raf);raf=0;}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){stopLoop();if(ptr){const id=ptr.id;onUp({pointerId:id,preventDefault(){}},true);}try{if(AC&&AC.state==='running')AC.suspend();}catch(e){}}
+  else{startLoop();try{if(AC&&AC.state==='suspended')AC.resume();}catch(e){}}
+});
+window.addEventListener('resize',()=>layout());
+window.addEventListener('orientationchange',()=>{layout();});
+
+// =====================================================================
+//  boot
+// =====================================================================
+initDolls();
+layout();
+{const st=tryLoad();if(st){applyLoaded(st);}else{dolls[0].x=W/2;dolls[0].y=LY.streetY;}}
+for(const k of GTYPES){const g=GR[k];if(g.on<0){g.x=LY.rack[k].x;g.y=LY.rack[k].y;}}
+mdl.x=LY.mbase.x;mdl.y=LY.mbase.y;
+// test hooks (no UI)
+window.__tk={get ST(){return ST;},dolls,GR,blk,mdl,LY,get view(){return view;},get inside(){return inside;},get hint(){return hint;},get demo(){return demo;},lotXY,houseRect,get S(){return S;},get D(){return D;},get trans(){return trans;},get parts(){return parts.length;},
+  rackPos:k=>({x:GR[k].x,y:GR[k].y}),slots:()=>inside?interiorSlots(inside.h):[],IL,get now(){return now;},trySave,serialize};
+startLoop();
+})();
+</script>
+</body>
+</html>
